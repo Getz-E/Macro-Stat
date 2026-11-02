@@ -1,0 +1,307 @@
+{
+  "id": "profile-cachy-default",
+  "name": "MacroStat Varsayılan Profil",
+  "description": "CachyOS & KDE Plasma için donanım tabanlı sıfır gecikmeli makrolar",
+  "panicKey": "KEY_PAUSE",
+  "virtualDeviceName": "MacroStat Virtual Engine",
+  "defaultJitterMs": 2,
+  "macros": [
+    {
+      "id": "macro-turbo-shift-ctrl",
+      "name": "Shift+Ctrl Çift Tuş Tetikleyici",
+      "description": "LeftShift + LeftCtrl kombinasyonuna basıldığında hızlı X tuşu tetikler.",
+      "enabled": true,
+      "triggerKey": "KEY_LEFTSHIFT+KEY_LEFTCTRL",
+      "triggerMode": "ONCE",
+      "repeatCount": 1,
+      "tags": [
+        "Kombinasyon",
+        "Oyun"
+      ],
+      "actions": [
+        {
+          "id": "a1",
+          "type": "KEY_DOWN",
+          "key": "KEY_X",
+          "description": "X tuşuna basılı tut"
+        },
+        {
+          "id": "a2",
+          "type": "DELAY",
+          "delayMs": 40,
+          "jitterMs": 2,
+          "description": "40ms bekle"
+        },
+        {
+          "id": "a3",
+          "type": "KEY_UP",
+          "key": "KEY_X",
+          "description": "X tuşunu bırak"
+        }
+      ],
+      "createdAt": 1793259933773,
+      "updatedAt": 1793259933773
+    },
+    {
+      "id": "macro-burst-clicker",
+      "name": "Mouse 5 Hızlı Tıklama",
+      "description": "Fare yan tuşuna (M5) basıldığında sol tık bas-çek yapar.",
+      "enabled": true,
+      "triggerKey": "BTN_EXTRA",
+      "triggerMode": "ONCE",
+      "repeatCount": 1,
+      "tags": [
+        "Fare",
+        "FPS"
+      ],
+      "actions": [
+        {
+          "id": "m1",
+          "type": "MOUSE_DOWN",
+          "mouseButton": "LEFT",
+          "description": "Sol fare tuşuna bas"
+        },
+        {
+          "id": "m2",
+          "type": "DELAY",
+          "delayMs": 25,
+          "jitterMs": 2,
+          "description": "25ms bekle"
+        },
+        {
+          "id": "m3",
+          "type": "MOUSE_UP",
+          "mouseButton": "LEFT",
+          "description": "Sol fareyi bırak"
+        }
+      ],
+      "createdAt": 1793256333773,
+      "updatedAt": 1793256333773
+    },
+    {
+      "id": "macro-fast-macro",
+      "name": "F8 Seri Metin & Enter",
+      "description": "F8 tuşuyla hızlı terminal komutunu enjekte eder.",
+      "enabled": true,
+      "triggerKey": "KEY_F8",
+      "triggerMode": "ONCE",
+      "repeatCount": 1,
+      "tags": [
+        "Otomasyon",
+        "Terminal"
+      ],
+      "actions": [
+        {
+          "id": "t1",
+          "type": "TEXT",
+          "text": "uname -r",
+          "description": "Metin yazdır"
+        },
+        {
+          "id": "t2",
+          "type": "DELAY",
+          "delayMs": 30,
+          "jitterMs": 1,
+          "description": "30ms bekle"
+        },
+        {
+          "id": "t3",
+          "type": "KEY_TAP",
+          "key": "KEY_ENTER",
+          "description": "Enter tuşuna bas"
+        }
+      ],
+      "createdAt": 1793252733773,
+      "updatedAt": 1793252733773
+    },
+    {
+      "id": "macro-yr3d5pt",
+      "name": "Yeni Makro",
+      "description": "Kullanıcı tanımlı makro",
+      "enabled": true,
+      "triggerKey": "KEY_A",
+      "triggerMode": "ONCE",
+      "repeatCount": 1,
+      "actions": [
+        {
+          "id": "act-1",
+          "type": "KEY_TAP",
+          "key": "KEY_X",
+          "delayMs": 20
+        },
+        {
+          "id": "act-2",
+          "type": "DELAY",
+          "delayMs": 40,
+          "jitterMs": 2
+        },
+        {
+          "id": "act-fe26ncx",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-8i710su",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-93gxpmh",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-ar49xhc",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-6hou3hh",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-arhp3t0",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-dvatjb8",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-y60omil",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-qircjy0",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-tdvknfk",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-up7xewj",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-xrzdr6n",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-rn63mnz",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-8kjt2c4",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-5r2yzwp",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-e8ajn17",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-u6srr2t",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-37r7neq",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-1mka5fl",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-j6j9ypu",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-6fk2ujv",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-q7w6e3j",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        },
+        {
+          "id": "act-71ltn10",
+          "type": "TEXT",
+          "delayMs": 20,
+          "jitterMs": 2,
+          "text": "Selam CachyOS!"
+        }
+      ],
+      "tags": [
+        "Özel"
+      ],
+      "createdAt": 1793269706930,
+      "updatedAt": 1793269706930
+    }
+  ]
+}

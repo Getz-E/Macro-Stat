@@ -1,0 +1,20 @@
+[package]
+name = "cachymacro-daemon"
+version = "1.0.0"
+edition = "2021"
+authors = ["MacroStat Author"]
+description = "Ultra Low Latency Linux Macro Engine for CachyOS and KDE Plasma"
+
+[dependencies]
+evdev = { version = "0.12", features = ["tokio"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rand = "0.8"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,8 @@
+target/
+*.AppImage
+MacroStat.AppDir/
+appimagetool
+__pycache__/
+*.pyc
+*.bak
+*.tmp
