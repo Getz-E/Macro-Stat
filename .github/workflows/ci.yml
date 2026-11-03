@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust motoru (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bağımlılıklar
+        run: sudo apt-get update && sudo apt-get install -y libevdev-dev pkg-config
+      - name: Rust araç zinciri
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Biçim denetimi
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --release -- -D warnings
+      - name: Birim testleri
+        run: cargo test --release
+
+  python:
+    name: PyQt6 arayüzü (sözdizimi + birim + duman testi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: PyQt6 kur
+        run: pip install "PyQt6>=6.5"
+      - name: Sözdizimi denetimi
+        run: python -m py_compile gui.py macrostat/*.py
+      - name: Python birim testleri
+        run: python -m unittest discover -s tests -v
+      - name: Betik sözdizimi
+        run: bash -n baslat-arayuz.sh build_appimage.sh install_all.sh
+      - name: Offscreen arayüz duman testi
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'PY'
+          import sys
+          from PyQt6.QtWidgets import QApplication
+          from macrostat import app as app_mod, common
+          app_mod.MacroStatApp.check_and_auto_start_daemon = lambda self: None
+          app_mod.MacroStatApp.update_daemon_status = lambda self: None
+          common.cleanup_daemon = lambda: None
+          app = QApplication(sys.argv)
+          window = app_mod.MacroStatApp()
+          app.processEvents()
+          assert window.tabs.count() == 4
+          window._force_close = True
+          window.close()
+          print("GUI OK")
+          PY

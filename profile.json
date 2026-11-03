@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 1,
   "activeProfileId": "profile-cachy-default",
   "profiles": [
     {
@@ -53,58 +54,6 @@
               "id": "act-2"
             }
           ]
-        }
-      ]
-    }
-  ],
-  "id": "profile-cachy-default",
-  "name": "MacroStat Varsayılan Profil",
-  "panicKey": "KEY_PAUSE",
-  "virtualDeviceName": "MacroStat Virtual Engine",
-  "defaultJitterMs": 2,
-  "macros": [
-    {
-      "id": "macro-burst-clicker",
-      "name": "Mouse 5 Hızlı Tıklama",
-      "description": "Fare yan tuşuna (M5) basıldığında sol tık bas-çek yapar.",
-      "enabled": true,
-      "triggerKey": "KEY_S",
-      "triggerMode": "TOGGLE_LOOP",
-      "repeatCount": 1,
-      "tags": [
-        "Fare",
-        "FPS"
-      ],
-      "actions": [
-        {
-          "type": "MOUSE_CLICK",
-          "mouseButton": "BTN_LEFT",
-          "delayMs": 15,
-          "id": "act-1"
-        }
-      ],
-      "createdAt": 1793256333773,
-      "updatedAt": 1793256333773
-    },
-    {
-      "id": "macro-1793527244099",
-      "name": "Yeni Makro",
-      "description": "Kullanıcı tanımlı makro",
-      "enabled": false,
-      "triggerKey": "KEY_LEFTSHIFT+KEY_LEFTCTRL",
-      "triggerMode": "ONCE",
-      "repeatCount": 1,
-      "actions": [
-        {
-          "type": "KEY_TAP",
-          "key": "KEY_X",
-          "id": "act-1"
-        },
-        {
-          "type": "DELAY",
-          "delayMs": 50,
-          "jitterMs": 2,
-          "id": "act-2"
         }
       ]
     }

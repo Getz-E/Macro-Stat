@@ -4,6 +4,8 @@ version = "1.0.0"
 edition = "2021"
 authors = ["MacroStat Author"]
 description = "Ultra Low Latency Linux Macro Engine for CachyOS and KDE Plasma"
+license = "GPL-3.0-or-later"
+readme = "README.md"
 
 [dependencies]
 evdev = { version = "0.12", features = ["tokio"] }

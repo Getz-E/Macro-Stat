@@ -37,7 +37,7 @@ chmod +x install_all.sh
 ```bash
 ./baslat-arayuz.sh
 ```
-*İster ana klasörde ister `cachymacro/` alt klasöründe olun, `./baslat-arayuz.sh` arayüzü ve motoru otomatik başlatır.*
+*Kök dizin kanoniktir; `./baslat-arayuz.sh` arayüzü ve motoru otomatik başlatır.*
 
 ---
 
@@ -56,6 +56,35 @@ chmod +x install_all.sh
 - **Shift+Ctrl Çift Tuş Kombinasyonu:** **LeftShift + LeftCtrl** tuşlarına birlikte bastığınızda tanımlı makro derhal tetiklenir.
 - **Mouse 5 (Yan Tuş) Tıklayıcı:** Farenizin yan ileri tuşuna bastığınızda hızlı sol tık simülasyonu çalışır.
 - **Canlı Günlüğü İnceleme:** Arayüzün üst çubuğundaki **"📋 Günlük"** butonuna basarak hangi tuşların algılandığını ve makroların ne zaman tetiklendiğini anlık olarak okuyabilirsiniz (`/tmp/cachymacro.log`).
+
+---
+
+## 🌐 Dil Seçimi (Türkçe / English)
+
+Başlık çubuğunun sağındaki **TR/EN** seçicisinden dili değiştirebilirsiniz.
+Onay verdikten sonra arayüz otomatik yeniden başlar; tercih
+`~/.config/cachymacro/settings.json` dosyasında saklanır. Kaydedilmemiş
+değişiklikler için uygulama yeniden başlamadan önce sorar.
+
+## 💾 Profil Yönetimi, Dışa/İçe Aktarma ve Yedek
+
+- **✏️ Yeniden adlandır / 🗑️ Sil:** Üst çubuktaki profil düğmeleri. Son kalan
+  profil silinemez; tüm eylemler onay ister.
+- **📤 Dışa aktar:** Yalnızca aktif profili veya tüm profilleri tek JSON dosyası
+  olarak kaydeder.
+- **📥 İçe aktar:** Çoklu profil dosyasındaki profiller yeni kimliklerle eklenir;
+  güvenlik için içe aktarılan makrolar **devre dışı** başlar. Profil sarmalayıcısı
+  olmayan eski tekil makro dosyaları aktif profile birleştirilir.
+- **Geri yükle:** Her kayıtta `~/.config/cachymacro/profile.json.bak` yedeği
+  tutulur. **Sistem** sekmesindeki düğmeyle son yedek tek tıkla geri yüklenir;
+  ardından arayüz profili yeniden yükler.
+
+## 🧪 Tek Makroyu Test Etme
+
+Makro düzenleyicide **▶ Makroyu Test Et** düğmesi, ekrandaki (kaydedilmemiş) eylemleri
+ayrı bir `MacroStat Test Engine` sanal aygıtıyla hemen çalıştırır. Gerçek profiliniz
+ve çalışan ana motor etkilenmez. Testin çalışması için `/dev/uinput` yazılabilir
+olmalıdır.
 
 ---
 
@@ -118,8 +147,8 @@ Tüm sistemi bağımsız, taşınabilir bir **AppImage** paketi olarak derleyip 
 chmod +x build_appimage.sh
 ./build_appimage.sh
 ```
-- Bu komut Rust motorunu derler, PyQt6 bağımlılıklarını hazırlar ve `MacroStat-x86_64.AppImage` dosyasını üretir.
-- **Kutudan Çıktığı Gibi Çalışma:** AppImage çift tıklandığında donanım izinlerini (`/dev/uinput`) denetler, kullanıcı profilini kalıcı olarak `~/.config/cachymacro/profile.json` konumuna yazar ve masaüstü kısayolunu sağlar.
+- Bu komut Rust motorunu derler ve `MacroStat-x86_64.AppImage` dosyasını üretir. **PyQt6 AppImage içine gömülmez**; sistemde `python-pyqt6` kurulu olmalıdır.
+- **İlk Açılış:** AppImage çift tıklandığında `/dev/uinput` yazma iznini denetler (eksikse uyarır) ve kullanıcı profilini `~/.config/cachymacro/profile.json` konumuna tohumlar. Masaüstü kısayolu otomatik oluşturulmaz; isterseniz `.desktop` dosyasını kendiniz ekleyebilirsiniz.
 
 ---
 
@@ -127,4 +156,10 @@ chmod +x build_appimage.sh
 Uygulama penceresini kapattığınızda:
 - Linux çekirdeği `PR_SET_PDEATHSIG` ve PyQt6 `closeEvent` kancaları devreye girer.
 - Arka plandaki Rust makro motoru (`cachymacro-daemon`) hiçbir yetim (zombie) süreç bırakmadan **TAMAMEN KAPANIR**.
+
+---
+
+## 📄 Lisans
+MacroStat, **GPL-3.0-or-later** (GNU General Public License v3.0 veya sonrası) altında dağıtılır.
+Tam metin `LICENSE` dosyasındadır; üçüncü taraf bileşenler ve lisansları `THIRD_PARTY.md` içinde listelenmiştir.
 

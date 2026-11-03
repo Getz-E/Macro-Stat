@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 MacroStat contributors
+//
 // MacroStat Rust Daemon - Linux evdev / uinput Zero Latency Engine
 #![allow(non_camel_case_types)]
 
@@ -6,7 +9,7 @@ use std::fs;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,25 +19,66 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 static PANIC_STOP: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+/// GUI kaydettiğinde motoru yeniden başlatmadan profili tazelemek için.
+static RELOAD: AtomicBool = AtomicBool::new(false);
+/// Aynı anda birden fazla makro thread'inin sanal tuş durumunu birbirine
+/// karıştırmasını önlemek için tek yürütme kilidi.
+static ACTION_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ActionType {
-    #[serde(alias = "key_down", alias = "KEY_DOWN", alias = "KeyDown", alias = "keyDown")]
+    #[serde(
+        alias = "key_down",
+        alias = "KEY_DOWN",
+        alias = "KeyDown",
+        alias = "keyDown"
+    )]
     KEY_DOWN,
     #[serde(alias = "key_up", alias = "KEY_UP", alias = "KeyUp", alias = "keyUp")]
     KEY_UP,
-    #[serde(alias = "key_tap", alias = "KEY_TAP", alias = "KeyTap", alias = "keyTap")]
+    #[serde(
+        alias = "key_tap",
+        alias = "KEY_TAP",
+        alias = "KeyTap",
+        alias = "keyTap"
+    )]
     KEY_TAP,
-    #[serde(alias = "mouse_down", alias = "MOUSE_DOWN", alias = "MouseDown", alias = "mouseDown")]
+    #[serde(
+        alias = "mouse_down",
+        alias = "MOUSE_DOWN",
+        alias = "MouseDown",
+        alias = "mouseDown"
+    )]
     MOUSE_DOWN,
-    #[serde(alias = "mouse_up", alias = "MOUSE_UP", alias = "MouseUp", alias = "mouseUp")]
+    #[serde(
+        alias = "mouse_up",
+        alias = "MOUSE_UP",
+        alias = "MouseUp",
+        alias = "mouseUp"
+    )]
     MOUSE_UP,
-    #[serde(alias = "mouse_click", alias = "MOUSE_CLICK", alias = "MouseClick", alias = "mouseClick")]
+    #[serde(
+        alias = "mouse_click",
+        alias = "MOUSE_CLICK",
+        alias = "MouseClick",
+        alias = "mouseClick"
+    )]
     MOUSE_CLICK,
-    #[serde(alias = "mouse_move", alias = "MOUSE_MOVE", alias = "MouseMove", alias = "mouseMove")]
+    #[serde(
+        alias = "mouse_move",
+        alias = "MOUSE_MOVE",
+        alias = "MouseMove",
+        alias = "mouseMove"
+    )]
     MOUSE_MOVE,
-    #[serde(alias = "mouse_scroll", alias = "MOUSE_SCROLL", alias = "MouseScroll", alias = "mouseScroll")]
+    #[serde(
+        alias = "mouse_scroll",
+        alias = "MOUSE_SCROLL",
+        alias = "MouseScroll",
+        alias = "mouseScroll"
+    )]
     MOUSE_SCROLL,
     #[serde(alias = "text", alias = "TEXT", alias = "Text")]
     TEXT,
@@ -66,26 +110,69 @@ pub struct MacroAction {
 pub enum TriggerMode {
     #[serde(alias = "once", alias = "ONCE", alias = "Once")]
     ONCE,
-    #[serde(alias = "while_held", alias = "WHILE_HELD", alias = "WhileHeld", alias = "whileHeld")]
+    #[serde(
+        alias = "while_held",
+        alias = "WHILE_HELD",
+        alias = "WhileHeld",
+        alias = "whileHeld"
+    )]
     WHILE_HELD,
-    #[serde(alias = "toggle_loop", alias = "TOGGLE_LOOP", alias = "ToggleLoop", alias = "toggleLoop")]
+    #[serde(
+        alias = "toggle_loop",
+        alias = "TOGGLE_LOOP",
+        alias = "ToggleLoop",
+        alias = "toggleLoop"
+    )]
     TOGGLE_LOOP,
-    #[serde(alias = "repeat_count", alias = "REPEAT_COUNT", alias = "RepeatCount", alias = "repeatCount")]
+    #[serde(
+        alias = "repeat_count",
+        alias = "REPEAT_COUNT",
+        alias = "RepeatCount",
+        alias = "repeatCount"
+    )]
     REPEAT_COUNT,
-    #[serde(alias = "double_tap", alias = "DOUBLE_TAP", alias = "DoubleTap", alias = "doubleTap")]
+    #[serde(
+        alias = "double_tap",
+        alias = "DOUBLE_TAP",
+        alias = "DoubleTap",
+        alias = "doubleTap"
+    )]
     DOUBLE_TAP,
-    #[serde(alias = "hold_long_press", alias = "HOLD_LONG_PRESS", alias = "HoldLongPress", alias = "holdLongPress", alias = "hold")]
+    #[serde(
+        alias = "hold_long_press",
+        alias = "HOLD_LONG_PRESS",
+        alias = "HoldLongPress",
+        alias = "holdLongPress",
+        alias = "hold"
+    )]
     HOLD_LONG_PRESS,
-    #[serde(alias = "press_and_release", alias = "PRESS_AND_RELEASE", alias = "PressAndRelease", alias = "pressAndRelease")]
+    #[serde(
+        alias = "press_and_release",
+        alias = "PRESS_AND_RELEASE",
+        alias = "PressAndRelease",
+        alias = "pressAndRelease"
+    )]
     PRESS_AND_RELEASE,
 }
 
-fn default_macro_name() -> String { "Yeni Makro".to_string() }
-fn default_true() -> bool { true }
-fn default_trigger_mode() -> TriggerMode { TriggerMode::ONCE }
-fn default_repeat_count() -> u32 { 1 }
-fn default_double_tap_timeout() -> u64 { 300 }
-fn default_hold_duration() -> u64 { 300 }
+fn default_macro_name() -> String {
+    "Yeni Makro".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_trigger_mode() -> TriggerMode {
+    TriggerMode::ONCE
+}
+fn default_repeat_count() -> u32 {
+    1
+}
+fn default_double_tap_timeout() -> u64 {
+    300
+}
+fn default_hold_duration() -> u64 {
+    300
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MacroConfig {
@@ -97,13 +184,29 @@ pub struct MacroConfig {
     pub enabled: bool,
     #[serde(rename = "triggerKey", alias = "trigger_key", default)]
     pub trigger_key: String,
-    #[serde(rename = "triggerMode", alias = "trigger_mode", default = "default_trigger_mode")]
+    #[serde(
+        rename = "triggerMode",
+        alias = "trigger_mode",
+        default = "default_trigger_mode"
+    )]
     pub trigger_mode: TriggerMode,
-    #[serde(rename = "repeatCount", alias = "repeat_count", default = "default_repeat_count")]
+    #[serde(
+        rename = "repeatCount",
+        alias = "repeat_count",
+        default = "default_repeat_count"
+    )]
     pub repeat_count: u32,
-    #[serde(rename = "doubleTapTimeoutMs", alias = "double_tap_timeout_ms", default = "default_double_tap_timeout")]
+    #[serde(
+        rename = "doubleTapTimeoutMs",
+        alias = "double_tap_timeout_ms",
+        default = "default_double_tap_timeout"
+    )]
     pub double_tap_timeout_ms: u64,
-    #[serde(rename = "holdDurationMs", alias = "hold_duration_ms", default = "default_hold_duration")]
+    #[serde(
+        rename = "holdDurationMs",
+        alias = "hold_duration_ms",
+        default = "default_hold_duration"
+    )]
     pub hold_duration_ms: u64,
     #[serde(rename = "releaseActions", alias = "release_actions", default)]
     pub release_actions: Vec<MacroAction>,
@@ -275,20 +378,31 @@ fn string_to_key(key_str: &str) -> Option<Key> {
         // Mouse buttons
         "BTN_LEFT" | "LEFT" | "MOUSE_1" | "MOUSE1" | "M1" | "LEFTCLICK" => Some(Key::BTN_LEFT),
         "BTN_RIGHT" | "RIGHT" | "MOUSE_2" | "MOUSE2" | "M2" | "RIGHTCLICK" => Some(Key::BTN_RIGHT),
-        "BTN_MIDDLE" | "MIDDLE" | "MOUSE_3" | "MOUSE3" | "M3" | "MIDDLECLICK" => Some(Key::BTN_MIDDLE),
-        "BTN_SIDE" | "SIDE" | "MOUSE_4" | "MOUSE4" | "M4" | "M4_SIDE" | "BTN_BACK" | "BACK" => Some(Key::BTN_SIDE),
-        "BTN_EXTRA" | "EXTRA" | "MOUSE_5" | "MOUSE5" | "M5" | "M5_SIDE" | "BTN_FORWARD" | "FORWARD" => Some(Key::BTN_EXTRA),
+        "BTN_MIDDLE" | "MIDDLE" | "MOUSE_3" | "MOUSE3" | "M3" | "MIDDLECLICK" => {
+            Some(Key::BTN_MIDDLE)
+        }
+        "BTN_SIDE" | "SIDE" | "MOUSE_4" | "MOUSE4" | "M4" | "M4_SIDE" | "BTN_BACK" | "BACK" => {
+            Some(Key::BTN_SIDE)
+        }
+        "BTN_EXTRA" | "EXTRA" | "MOUSE_5" | "MOUSE5" | "M5" | "M5_SIDE" | "BTN_FORWARD"
+        | "FORWARD" => Some(Key::BTN_EXTRA),
 
         _ => None,
     }
 }
 
 fn keys_are_equivalent(k1: Key, k2: Key) -> bool {
-    if k1 == k2 { return true; }
-    let is_ctrl = (k1 == Key::KEY_LEFTCTRL || k1 == Key::KEY_RIGHTCTRL) && (k2 == Key::KEY_LEFTCTRL || k2 == Key::KEY_RIGHTCTRL);
-    let is_shift = (k1 == Key::KEY_LEFTSHIFT || k1 == Key::KEY_RIGHTSHIFT) && (k2 == Key::KEY_LEFTSHIFT || k2 == Key::KEY_RIGHTSHIFT);
-    let is_alt = (k1 == Key::KEY_LEFTALT || k1 == Key::KEY_RIGHTALT) && (k2 == Key::KEY_LEFTALT || k2 == Key::KEY_RIGHTALT);
-    let is_meta = (k1 == Key::KEY_LEFTMETA || k1 == Key::KEY_RIGHTMETA) && (k2 == Key::KEY_LEFTMETA || k2 == Key::KEY_RIGHTMETA);
+    if k1 == k2 {
+        return true;
+    }
+    let is_ctrl = (k1 == Key::KEY_LEFTCTRL || k1 == Key::KEY_RIGHTCTRL)
+        && (k2 == Key::KEY_LEFTCTRL || k2 == Key::KEY_RIGHTCTRL);
+    let is_shift = (k1 == Key::KEY_LEFTSHIFT || k1 == Key::KEY_RIGHTSHIFT)
+        && (k2 == Key::KEY_LEFTSHIFT || k2 == Key::KEY_RIGHTSHIFT);
+    let is_alt = (k1 == Key::KEY_LEFTALT || k1 == Key::KEY_RIGHTALT)
+        && (k2 == Key::KEY_LEFTALT || k2 == Key::KEY_RIGHTALT);
+    let is_meta = (k1 == Key::KEY_LEFTMETA || k1 == Key::KEY_RIGHTMETA)
+        && (k2 == Key::KEY_LEFTMETA || k2 == Key::KEY_RIGHTMETA);
     is_ctrl || is_shift || is_alt || is_meta
 }
 
@@ -351,15 +465,31 @@ fn char_to_evdev_key(c: char) -> Option<(Key, bool)> {
     }
 }
 
+/// US-ASCII dışı karakterleri sessizce yutmak yerine süreç başına bir kez uyarır.
+fn warn_unsupported_char(c: char) {
+    static WARNED: OnceLock<Mutex<HashSet<char>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    if warned.lock().unwrap().insert(c) {
+        eprintln!(
+            "[UYARI] '{}' karakteri TEXT eyleminde desteklenmiyor (yalnızca US-ASCII); atlandı.",
+            c
+        );
+    }
+}
+
 fn create_virtual_device(name: &str) -> VirtualDevice {
-    let dev_name = if name.is_empty() { "MacroStat Virtual Engine" } else { name };
+    let dev_name = if name.is_empty() {
+        "MacroStat Virtual Engine"
+    } else {
+        name
+    };
     let mut keys = AttributeSet::<Key>::new();
-    
+
     // Standart masaüstü klavye tuşları (1 - 248): A-Z, 0-9, F1-F24, Modifiyeler, Yön ve Numpad
     for code in 1..=248 {
         keys.insert(Key::new(code));
     }
-    
+
     // Standart masaüstü fare tuşları (272 - 279): Sol, Sağ, Orta, M4, M5, İleri, Geri, Görev
     // ÖNEMLİ: 288-320 (BTN_JOYSTICK, BTN_GAMEPAD) bilerek EKLENMEMİŞTİR.
     // Bu sayede KDE Wayland ve libinput aygıtı doğrudan standart klavye/fare olarak kabul eder.
@@ -418,7 +548,9 @@ fn release_all_keys(dev: &mut VirtualDevice, pressed_keys: &mut HashSet<Key>) {
 }
 
 fn cancellable_sleep(ms: u64, jitter_ms: u64, stop_flag: Option<&Arc<AtomicBool>>) -> bool {
-    if ms == 0 { return true; }
+    if ms == 0 {
+        return true;
+    }
     let mut rng = rand::thread_rng();
     let effective_ms = if jitter_ms > 0 {
         let delta = rng.gen_range(0..=(jitter_ms * 2)) as i64 - jitter_ms as i64;
@@ -429,7 +561,8 @@ fn cancellable_sleep(ms: u64, jitter_ms: u64, stop_flag: Option<&Arc<AtomicBool>
     let start = Instant::now();
     let target = Duration::from_millis(effective_ms);
     while start.elapsed() < target {
-        if PANIC_STOP.load(Ordering::SeqCst) || stop_flag.map_or(false, |f| !f.load(Ordering::SeqCst)) {
+        if PANIC_STOP.load(Ordering::SeqCst) || stop_flag.is_some_and(|f| !f.load(Ordering::SeqCst))
+        {
             return false;
         }
         let remaining = target - start.elapsed();
@@ -445,8 +578,16 @@ fn execute_macro_actions(
     pressed_keys: &Arc<Mutex<HashSet<Key>>>,
     stop_flag: Option<&Arc<AtomicBool>>,
 ) -> bool {
+    // Eylem sıraları serileştirilir: KEY_DOWN/KEY_UP durumu thread'ler arasında
+    // karışmaz. Kilit her eylem dizisi/iterasyon sonunda bırakılır, döngüsel
+    // makrolar diğer makroları süresiz kilitlemez.
+    let _action_guard = ACTION_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     for action in actions {
-        if PANIC_STOP.load(Ordering::SeqCst) || stop_flag.map_or(false, |f| !f.load(Ordering::SeqCst)) {
+        if PANIC_STOP.load(Ordering::SeqCst) || stop_flag.is_some_and(|f| !f.load(Ordering::SeqCst))
+        {
             let mut dev = vdev.lock().unwrap();
             let mut pressed = pressed_keys.lock().unwrap();
             release_all_keys(&mut dev, &mut pressed);
@@ -576,7 +717,9 @@ fn execute_macro_actions(
                     drop(dev);
                     drop(pressed);
                     for ch in txt.chars() {
-                        if PANIC_STOP.load(Ordering::SeqCst) || stop_flag.map_or(false, |f| !f.load(Ordering::SeqCst)) {
+                        if PANIC_STOP.load(Ordering::SeqCst)
+                            || stop_flag.is_some_and(|f| !f.load(Ordering::SeqCst))
+                        {
                             let mut d = vdev.lock().unwrap();
                             let mut p = pressed_keys.lock().unwrap();
                             release_all_keys(&mut d, &mut p);
@@ -586,6 +729,8 @@ fn execute_macro_actions(
                             let mut dev_c = vdev.lock().unwrap();
                             if with_shift {
                                 emit_key(&mut dev_c, Key::KEY_LEFTSHIFT, 1);
+                                // İzlenen sete eklenmezse iptal/STOP anında Shift takılı kalır.
+                                pressed_keys.lock().unwrap().insert(Key::KEY_LEFTSHIFT);
                                 drop(dev_c);
                                 if !cancellable_sleep(8, 0, stop_flag) {
                                     let mut d = vdev.lock().unwrap();
@@ -615,6 +760,7 @@ fn execute_macro_actions(
                                 }
                                 dev_c2 = vdev.lock().unwrap();
                                 emit_key(&mut dev_c2, Key::KEY_LEFTSHIFT, 0);
+                                pressed_keys.lock().unwrap().remove(&Key::KEY_LEFTSHIFT);
                             }
                             drop(dev_c2);
                             if !cancellable_sleep(16, 0, stop_flag) {
@@ -623,6 +769,8 @@ fn execute_macro_actions(
                                 release_all_keys(&mut d, &mut p);
                                 return false;
                             }
+                        } else {
+                            warn_unsupported_char(ch);
                         }
                     }
                     continue;
@@ -649,7 +797,7 @@ fn execute_macro_actions(
     true
 }
 
-fn discover_devices() -> (Vec<evdev::Device>, usize) {
+fn discover_devices(verbose: bool) -> (Vec<evdev::Device>, usize) {
     let mut devices = Vec::new();
     let mut permission_denied = 0;
 
@@ -661,7 +809,10 @@ fn discover_devices() -> (Vec<evdev::Device>, usize) {
                     match evdev::Device::open(&path) {
                         Ok(dev) => {
                             if let Some(name) = dev.name() {
-                                if name.contains("MacroStat") || name.contains("CachyMacro") || name.contains("Virtual Engine") {
+                                if name.contains("MacroStat")
+                                    || name.contains("CachyMacro")
+                                    || name.contains("Virtual Engine")
+                                {
                                     continue;
                                 }
                             }
@@ -672,7 +823,13 @@ fn discover_devices() -> (Vec<evdev::Device>, usize) {
                             };
 
                             if is_input {
-                                println!(" -> [Aygıt Bağlandı] {} ({})", dev.name().unwrap_or("Giriş Aygıtı"), path.display());
+                                if verbose {
+                                    println!(
+                                        " -> [Aygıt Bağlandı] {} ({})",
+                                        dev.name().unwrap_or("Giriş Aygıtı"),
+                                        path.display()
+                                    );
+                                }
                                 devices.push(dev);
                             }
                         }
@@ -689,74 +846,402 @@ fn discover_devices() -> (Vec<evdev::Device>, usize) {
     (devices, permission_denied)
 }
 
-fn main() {
-    // Linux PR_SET_PDEATHSIG: Ana GUI kapandığında kernel bu motoru derhal SIGTERM ile sonlandırır
+/// /dev/input dizinini inotify ile izler; başarısız olursa -1 döner.
+fn setup_input_watch() -> libc::c_int {
     unsafe {
-        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+        let fd = libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC);
+        if fd < 0 {
+            eprintln!("[UYARI] inotify başlatılamadı; aygıtlar 4 sn'de bir yoklanacak.");
+            return -1;
+        }
+        let path = std::ffi::CString::new("/dev/input").unwrap();
+        let wd = libc::inotify_add_watch(
+            fd,
+            path.as_ptr(),
+            libc::IN_CREATE
+                | libc::IN_DELETE
+                | libc::IN_ATTRIB
+                | libc::IN_MOVED_TO
+                | libc::IN_MOVED_FROM,
+        );
+        if wd < 0 {
+            eprintln!("[UYARI] /dev/input izlenemiyor; aygıtlar 4 sn'de bir yoklanacak.");
+            libc::close(fd);
+            return -1;
+        }
+        fd
     }
+}
 
-    println!("=======================================================");
-    println!("  MacroStat Daemon - Linux (CachyOS/KDE) Makro Motoru ");
-    println!("  Wayland & X11 | Panic Switch: KEY_PAUSE ");
-    println!("=======================================================");
+/// Bekleyen inotify olaylarını tüketir; en az bir olay varsa true döner.
+fn drain_input_watch(fd: libc::c_int) -> bool {
+    if fd < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 4096];
+    let mut got = false;
+    loop {
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            got = true;
+            continue;
+        }
+        // EAGAIN/EWOULDBLOCK: kuyruk boş. EINTR: olaylar kuyrukta kaldı, sonraki turda alınır.
+        break;
+    }
+    got
+}
 
-    let args: Vec<String> = std::env::args().collect();
-    let config_path = if args.len() > 1 && Path::new(&args[1]).exists() {
-        Path::new(&args[1]).to_path_buf()
-    } else if Path::new("profile.json").exists() {
-        Path::new("profile.json").to_path_buf()
-    } else {
-        Path::new("profile.json").to_path_buf()
-    };
+// ---------------------------------------------------------------------------
+// Profil, sinyal ve süreç yönetimi yardımcıları
+// ---------------------------------------------------------------------------
 
-    let profile: ProfileConfig = if config_path.exists() {
-        println!("[BİLGİ] Yapılandırma dosyası okunuyor: {}", config_path.display());
-        match fs::read_to_string(&config_path) {
-            Ok(contents) => {
-                if let Ok(wrapper) = serde_json::from_str::<MultiProfileWrapper>(&contents) {
-                    if !wrapper.profiles.is_empty() {
-                        let active_id = wrapper.active_profile_id.unwrap_or_default();
-                        let selected = wrapper.profiles.iter().find(|p| p.id == active_id).cloned().unwrap_or_else(|| wrapper.profiles[0].clone());
-                        println!("[BAŞARILI] Çoklu Profil Yapılandırması Yüklendi! (Toplam {} profil mevcut)", wrapper.profiles.len());
-                        println!("[İZOLASYON AKTİF] Seçili Aktif Profil: '{}' ({} makro). Diğer profiller devre dışıdır.", selected.name, selected.macros.len());
-                        selected
-                    } else {
-                        serde_json::from_str::<ProfileConfig>(&contents).unwrap_or_else(|_| serde_json::from_str::<ProfileConfig>(r#"{"id":"profile-cachy-default","name":"MacroStat Varsayılan Profil","description":"CachyOS & KDE Plasma için donanım tabanlı sıfır gecikmeli makrolar","panicKey":"KEY_PAUSE","virtualDeviceName":"MacroStat Virtual Engine","defaultJitterMs":2,"macros":[{"id":"macro-turbo-shift-ctrl","name":"Shift+Ctrl Çift Tuş Tetikleyici","description":"LeftShift + LeftCtrl kombinasyonuna basıldığında hızlı X tuşu tetikler.","enabled":true,"triggerKey":"KEY_LEFTSHIFT+KEY_LEFTCTRL","triggerMode":"ONCE","repeatCount":1,"tags":["Kombinasyon","Oyun"],"actions":[{"id":"a1","type":"KEY_DOWN","key":"KEY_X","description":"X tuşuna basılı tut"},{"id":"a2","type":"DELAY","delayMs":40,"jitterMs":2,"description":"40ms bekle"},{"id":"a3","type":"KEY_UP","key":"KEY_X","description":"X tuşunu bırak"}],"createdAt":1793259933773,"updatedAt":1793259933773},{"id":"macro-burst-clicker","name":"Mouse 5 Hızlı Tıklama","description":"Fare yan tuşuna (M5) basıldığında sol tık bas-çek yapar.","enabled":true,"triggerKey":"BTN_EXTRA","triggerMode":"ONCE","repeatCount":1,"tags":["Fare","FPS"],"actions":[{"id":"m1","type":"MOUSE_DOWN","mouseButton":"LEFT","description":"Sol fare tuşuna bas"},{"id":"m2","type":"DELAY","delayMs":25,"jitterMs":2,"description":"25ms bekle"},{"id":"m3","type":"MOUSE_UP","mouseButton":"LEFT","description":"Sol fareyi bırak"}],"createdAt":1793256333773,"updatedAt":1793256333773},{"id":"macro-fast-macro","name":"F8 Seri Metin & Enter","description":"F8 tuşuyla hızlı terminal komutunu enjekte eder.","enabled":true,"triggerKey":"KEY_F8","triggerMode":"ONCE","repeatCount":1,"tags":["Otomasyon","Terminal"],"actions":[{"id":"t1","type":"TEXT","text":"uname -r","description":"Metin yazdır"},{"id":"t2","type":"DELAY","delayMs":30,"jitterMs":1,"description":"30ms bekle"},{"id":"t3","type":"KEY_TAP","key":"KEY_ENTER","description":"Enter tuşuna bas"}],"createdAt":1793252733773,"updatedAt":1793252733773},{"id":"macro-yr3d5pt","name":"Yeni Makro","description":"Kullanıcı tanımlı makro","enabled":true,"triggerKey":"KEY_A","triggerMode":"ONCE","repeatCount":1,"actions":[{"id":"act-1","type":"KEY_TAP","key":"KEY_X","delayMs":20},{"id":"act-2","type":"DELAY","delayMs":40,"jitterMs":2},{"id":"act-fe26ncx","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-8i710su","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-93gxpmh","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-ar49xhc","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-6hou3hh","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-arhp3t0","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-dvatjb8","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-y60omil","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-qircjy0","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-tdvknfk","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-up7xewj","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-xrzdr6n","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-rn63mnz","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-8kjt2c4","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-5r2yzwp","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-e8ajn17","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-u6srr2t","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-37r7neq","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-1mka5fl","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-j6j9ypu","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-6fk2ujv","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-q7w6e3j","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-71ltn10","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"}],"tags":["Özel"],"createdAt":1793269706930,"updatedAt":1793269706930}]}"#).unwrap())
-                    }
-                } else if let Ok(p) = serde_json::from_str::<ProfileConfig>(&contents) {
-                    println!("[BAŞARILI] Profil başarıyla yüklendi: {} ({} makro)", p.name, p.macros.len());
-                    p
-                } else {
-                    eprintln!("[UYARI] profile.json ayrıştırılamadı. Varsayılan profil kullanılıyor.");
-                    serde_json::from_str::<ProfileConfig>(r#"{"id":"profile-cachy-default","name":"MacroStat Varsayılan Profil","description":"CachyOS & KDE Plasma için donanım tabanlı sıfır gecikmeli makrolar","panicKey":"KEY_PAUSE","virtualDeviceName":"MacroStat Virtual Engine","defaultJitterMs":2,"macros":[{"id":"macro-turbo-shift-ctrl","name":"Shift+Ctrl Çift Tuş Tetikleyici","description":"LeftShift + LeftCtrl kombinasyonuna basıldığında hızlı X tuşu tetikler.","enabled":true,"triggerKey":"KEY_LEFTSHIFT+KEY_LEFTCTRL","triggerMode":"ONCE","repeatCount":1,"tags":["Kombinasyon","Oyun"],"actions":[{"id":"a1","type":"KEY_DOWN","key":"KEY_X","description":"X tuşuna basılı tut"},{"id":"a2","type":"DELAY","delayMs":40,"jitterMs":2,"description":"40ms bekle"},{"id":"a3","type":"KEY_UP","key":"KEY_X","description":"X tuşunu bırak"}],"createdAt":1793259933773,"updatedAt":1793259933773},{"id":"macro-burst-clicker","name":"Mouse 5 Hızlı Tıklama","description":"Fare yan tuşuna (M5) basıldığında sol tık bas-çek yapar.","enabled":true,"triggerKey":"BTN_EXTRA","triggerMode":"ONCE","repeatCount":1,"tags":["Fare","FPS"],"actions":[{"id":"m1","type":"MOUSE_DOWN","mouseButton":"LEFT","description":"Sol fare tuşuna bas"},{"id":"m2","type":"DELAY","delayMs":25,"jitterMs":2,"description":"25ms bekle"},{"id":"m3","type":"MOUSE_UP","mouseButton":"LEFT","description":"Sol fareyi bırak"}],"createdAt":1793256333773,"updatedAt":1793256333773},{"id":"macro-fast-macro","name":"F8 Seri Metin & Enter","description":"F8 tuşuyla hızlı terminal komutunu enjekte eder.","enabled":true,"triggerKey":"KEY_F8","triggerMode":"ONCE","repeatCount":1,"tags":["Otomasyon","Terminal"],"actions":[{"id":"t1","type":"TEXT","text":"uname -r","description":"Metin yazdır"},{"id":"t2","type":"DELAY","delayMs":30,"jitterMs":1,"description":"30ms bekle"},{"id":"t3","type":"KEY_TAP","key":"KEY_ENTER","description":"Enter tuşuna bas"}],"createdAt":1793252733773,"updatedAt":1793252733773},{"id":"macro-yr3d5pt","name":"Yeni Makro","description":"Kullanıcı tanımlı makro","enabled":true,"triggerKey":"KEY_A","triggerMode":"ONCE","repeatCount":1,"actions":[{"id":"act-1","type":"KEY_TAP","key":"KEY_X","delayMs":20},{"id":"act-2","type":"DELAY","delayMs":40,"jitterMs":2},{"id":"act-fe26ncx","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-8i710su","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-93gxpmh","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-ar49xhc","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-6hou3hh","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-arhp3t0","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-dvatjb8","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-y60omil","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-qircjy0","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-tdvknfk","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-up7xewj","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-xrzdr6n","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-rn63mnz","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-8kjt2c4","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-5r2yzwp","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-e8ajn17","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-u6srr2t","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-37r7neq","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-1mka5fl","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-j6j9ypu","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-6fk2ujv","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-q7w6e3j","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-71ltn10","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"}],"tags":["Özel"],"createdAt":1793269706930,"updatedAt":1793269706930}]}"#).unwrap()
+/// Depoya gömülü tek varsayılan profil kaynağı (release derlemesinde sabitlenir).
+const DEFAULT_PROFILE_JSON: &str = include_str!("../profile.json");
+
+extern "C" fn handle_termination(_signal: libc::c_int) {
+    // Sinyal işleyicisi yalnızca atomik bayrak yazar; temizlik ana döngüde yapılır.
+    SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+extern "C" fn handle_reload(_signal: libc::c_int) {
+    RELOAD.store(true, Ordering::SeqCst);
+}
+
+/// Aynı kullanıcı için ikinci bir motorun başlamasını engeller.
+/// Kilit süreç yaşadığı sürece tutulur; süreç ölünce kernel kilidi bırakır.
+fn acquire_single_instance_lock() -> Option<fs::File> {
+    let uid = unsafe { libc::getuid() };
+    let candidates = [
+        format!("/run/user/{}/cachymacro.lock", uid),
+        format!("/tmp/cachymacro-{}.lock", uid),
+    ];
+    for path in candidates {
+        match fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if rc == 0 {
+                    return Some(file);
                 }
+                eprintln!(
+                    "[HATA] Başka bir MacroStat motoru zaten çalışıyor (kilit: {}).",
+                    path
+                );
+                std::process::exit(3);
             }
             Err(e) => {
-                eprintln!("[UYARI] profile.json okunamadı: {}. Varsayılan profil kullanılıyor.", e);
-                serde_json::from_str::<ProfileConfig>(r#"{"id":"profile-cachy-default","name":"MacroStat Varsayılan Profil","description":"CachyOS & KDE Plasma için donanım tabanlı sıfır gecikmeli makrolar","panicKey":"KEY_PAUSE","virtualDeviceName":"MacroStat Virtual Engine","defaultJitterMs":2,"macros":[{"id":"macro-turbo-shift-ctrl","name":"Shift+Ctrl Çift Tuş Tetikleyici","description":"LeftShift + LeftCtrl kombinasyonuna basıldığında hızlı X tuşu tetikler.","enabled":true,"triggerKey":"KEY_LEFTSHIFT+KEY_LEFTCTRL","triggerMode":"ONCE","repeatCount":1,"tags":["Kombinasyon","Oyun"],"actions":[{"id":"a1","type":"KEY_DOWN","key":"KEY_X","description":"X tuşuna basılı tut"},{"id":"a2","type":"DELAY","delayMs":40,"jitterMs":2,"description":"40ms bekle"},{"id":"a3","type":"KEY_UP","key":"KEY_X","description":"X tuşunu bırak"}],"createdAt":1793259933773,"updatedAt":1793259933773},{"id":"macro-burst-clicker","name":"Mouse 5 Hızlı Tıklama","description":"Fare yan tuşuna (M5) basıldığında sol tık bas-çek yapar.","enabled":true,"triggerKey":"BTN_EXTRA","triggerMode":"ONCE","repeatCount":1,"tags":["Fare","FPS"],"actions":[{"id":"m1","type":"MOUSE_DOWN","mouseButton":"LEFT","description":"Sol fare tuşuna bas"},{"id":"m2","type":"DELAY","delayMs":25,"jitterMs":2,"description":"25ms bekle"},{"id":"m3","type":"MOUSE_UP","mouseButton":"LEFT","description":"Sol fareyi bırak"}],"createdAt":1793256333773,"updatedAt":1793256333773},{"id":"macro-fast-macro","name":"F8 Seri Metin & Enter","description":"F8 tuşuyla hızlı terminal komutunu enjekte eder.","enabled":true,"triggerKey":"KEY_F8","triggerMode":"ONCE","repeatCount":1,"tags":["Otomasyon","Terminal"],"actions":[{"id":"t1","type":"TEXT","text":"uname -r","description":"Metin yazdır"},{"id":"t2","type":"DELAY","delayMs":30,"jitterMs":1,"description":"30ms bekle"},{"id":"t3","type":"KEY_TAP","key":"KEY_ENTER","description":"Enter tuşuna bas"}],"createdAt":1793252733773,"updatedAt":1793252733773},{"id":"macro-yr3d5pt","name":"Yeni Makro","description":"Kullanıcı tanımlı makro","enabled":true,"triggerKey":"KEY_A","triggerMode":"ONCE","repeatCount":1,"actions":[{"id":"act-1","type":"KEY_TAP","key":"KEY_X","delayMs":20},{"id":"act-2","type":"DELAY","delayMs":40,"jitterMs":2},{"id":"act-fe26ncx","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-8i710su","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-93gxpmh","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-ar49xhc","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-6hou3hh","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-arhp3t0","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-dvatjb8","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-y60omil","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-qircjy0","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-tdvknfk","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-up7xewj","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-xrzdr6n","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-rn63mnz","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-8kjt2c4","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-5r2yzwp","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-e8ajn17","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-u6srr2t","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-37r7neq","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-1mka5fl","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-j6j9ypu","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-6fk2ujv","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-q7w6e3j","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-71ltn10","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"}],"tags":["Özel"],"createdAt":1793269706930,"updatedAt":1793269706930}]}"#).unwrap()
+                eprintln!("[UYARI] Kilit dosyası açılamadı ({}): {}", path, e);
+            }
+        }
+    }
+    eprintln!("[UYARI] Tek örnek kilidi oluşturulamadı; motor yine de başlatılıyor.");
+    None
+}
+
+/// Çoklu profil sarmalayıcısını veya eski tekil profili tek noktadan çözer.
+fn parse_profile(contents: &str) -> Option<ProfileConfig> {
+    if let Ok(wrapper) = serde_json::from_str::<MultiProfileWrapper>(contents) {
+        if !wrapper.profiles.is_empty() {
+            let active_id = wrapper.active_profile_id.clone().unwrap_or_default();
+            let selected = wrapper
+                .profiles
+                .iter()
+                .find(|p| p.id == active_id)
+                .cloned()
+                .unwrap_or_else(|| wrapper.profiles[0].clone());
+            println!(
+                "[BAŞARILI] Çoklu profil yapılandırması yüklendi ({} profil). Aktif: '{}'",
+                wrapper.profiles.len(),
+                selected.name
+            );
+            return Some(selected);
+        }
+    }
+    serde_json::from_str::<ProfileConfig>(contents).ok()
+}
+
+fn default_profile() -> ProfileConfig {
+    parse_profile(DEFAULT_PROFILE_JSON).unwrap_or_else(|| ProfileConfig {
+        id: "profile-cachy-default".to_string(),
+        name: "MacroStat Varsayılan Profil".to_string(),
+        panic_key: "KEY_PAUSE".to_string(),
+        virtual_device_name: "MacroStat Virtual Engine".to_string(),
+        macros: Vec::new(),
+    })
+}
+
+/// Sol/sağ varyantlarını aynı fiziksel tuş sınıfına indirger (çift dokunma izleme).
+fn canonical_key_id(key: Key) -> u16 {
+    if key == Key::KEY_LEFTCTRL || key == Key::KEY_RIGHTCTRL {
+        Key::KEY_LEFTCTRL.0
+    } else if key == Key::KEY_LEFTSHIFT || key == Key::KEY_RIGHTSHIFT {
+        Key::KEY_LEFTSHIFT.0
+    } else if key == Key::KEY_LEFTALT || key == Key::KEY_RIGHTALT {
+        Key::KEY_LEFTALT.0
+    } else if key == Key::KEY_LEFTMETA || key == Key::KEY_RIGHTMETA {
+        Key::KEY_LEFTMETA.0
+    } else {
+        key.0
+    }
+}
+
+/// Her tuş olayında yeniden ayrıştırma yapmamak için tetikleyiciler açılışta derlenir.
+struct CompiledMacro {
+    id: String,
+    name: String,
+    trigger_key: String,
+    mode: TriggerMode,
+    single: Option<Key>,
+    combo: Vec<Key>,
+    repeat_count: u32,
+    double_tap_ms: u64,
+    hold_ms: u64,
+    action_index: usize,
+}
+
+fn compile_macros(profile: &ProfileConfig) -> Vec<CompiledMacro> {
+    let mut compiled = Vec::new();
+    for (index, m) in profile.macros.iter().enumerate() {
+        if !m.enabled {
+            continue;
+        }
+        let parts: Vec<&str> = m
+            .trigger_key
+            .split('+')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect();
+        let keys: Vec<Key> = parts
+            .iter()
+            .filter_map(|part| string_to_key(part))
+            .collect();
+        if keys.is_empty() || keys.len() != parts.len() {
+            eprintln!(
+                "[UYARI] Geçersiz tetikleyici '{}' (makro: '{}'), atlandı.",
+                m.trigger_key, m.name
+            );
+            continue;
+        }
+        let id = if m.id.is_empty() {
+            format!("idx-{}", index)
+        } else {
+            format!("{}#{}", m.id, index)
+        };
+        compiled.push(CompiledMacro {
+            id,
+            name: m.name.clone(),
+            trigger_key: m.trigger_key.clone(),
+            mode: m.trigger_mode.clone(),
+            single: if keys.len() == 1 { Some(keys[0]) } else { None },
+            combo: if keys.len() > 1 { keys } else { Vec::new() },
+            repeat_count: m.repeat_count.max(1),
+            double_tap_ms: m.double_tap_timeout_ms.max(1),
+            hold_ms: m.hold_duration_ms.max(1),
+            action_index: index,
+        });
+    }
+    compiled
+}
+
+fn trigger_matches(m: &CompiledMacro, key: Key, is_press: bool, held: &HashSet<Key>) -> bool {
+    if !is_press {
+        return false;
+    }
+    if let Some(single) = m.single {
+        keys_are_equivalent(single, key)
+    } else {
+        m.combo.iter().any(|k| keys_are_equivalent(*k, key))
+            && m.combo
+                .iter()
+                .all(|k| held.iter().any(|h| keys_are_equivalent(*k, *h)))
+    }
+}
+
+fn load_profile_file(config_path: &Path) -> ProfileConfig {
+    if config_path.exists() {
+        println!(
+            "[BİLGİ] Yapılandırma dosyası okunuyor: {}",
+            config_path.display()
+        );
+        match fs::read_to_string(config_path) {
+            Ok(contents) => match parse_profile(&contents) {
+                Some(p) => p,
+                None => {
+                    eprintln!(
+                        "[UYARI] {} ayrıştırılamadı. Varsayılan profil kullanılıyor.",
+                        config_path.display()
+                    );
+                    default_profile()
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "[UYARI] {} okunamadı: {}. Varsayılan profil kullanılıyor.",
+                    config_path.display(),
+                    e
+                );
+                default_profile()
             }
         }
     } else {
-        println!("[BİLGİ] profile.json bulunamadı, varsayılan profil yükleniyor.");
-        serde_json::from_str::<ProfileConfig>(r#"{"id":"profile-cachy-default","name":"MacroStat Varsayılan Profil","description":"CachyOS & KDE Plasma için donanım tabanlı sıfır gecikmeli makrolar","panicKey":"KEY_PAUSE","virtualDeviceName":"MacroStat Virtual Engine","defaultJitterMs":2,"macros":[{"id":"macro-turbo-shift-ctrl","name":"Shift+Ctrl Çift Tuş Tetikleyici","description":"LeftShift + LeftCtrl kombinasyonuna basıldığında hızlı X tuşu tetikler.","enabled":true,"triggerKey":"KEY_LEFTSHIFT+KEY_LEFTCTRL","triggerMode":"ONCE","repeatCount":1,"tags":["Kombinasyon","Oyun"],"actions":[{"id":"a1","type":"KEY_DOWN","key":"KEY_X","description":"X tuşuna basılı tut"},{"id":"a2","type":"DELAY","delayMs":40,"jitterMs":2,"description":"40ms bekle"},{"id":"a3","type":"KEY_UP","key":"KEY_X","description":"X tuşunu bırak"}],"createdAt":1793259933773,"updatedAt":1793259933773},{"id":"macro-burst-clicker","name":"Mouse 5 Hızlı Tıklama","description":"Fare yan tuşuna (M5) basıldığında sol tık bas-çek yapar.","enabled":true,"triggerKey":"BTN_EXTRA","triggerMode":"ONCE","repeatCount":1,"tags":["Fare","FPS"],"actions":[{"id":"m1","type":"MOUSE_DOWN","mouseButton":"LEFT","description":"Sol fare tuşuna bas"},{"id":"m2","type":"DELAY","delayMs":25,"jitterMs":2,"description":"25ms bekle"},{"id":"m3","type":"MOUSE_UP","mouseButton":"LEFT","description":"Sol fareyi bırak"}],"createdAt":1793256333773,"updatedAt":1793256333773},{"id":"macro-fast-macro","name":"F8 Seri Metin & Enter","description":"F8 tuşuyla hızlı terminal komutunu enjekte eder.","enabled":true,"triggerKey":"KEY_F8","triggerMode":"ONCE","repeatCount":1,"tags":["Otomasyon","Terminal"],"actions":[{"id":"t1","type":"TEXT","text":"uname -r","description":"Metin yazdır"},{"id":"t2","type":"DELAY","delayMs":30,"jitterMs":1,"description":"30ms bekle"},{"id":"t3","type":"KEY_TAP","key":"KEY_ENTER","description":"Enter tuşuna bas"}],"createdAt":1793252733773,"updatedAt":1793252733773},{"id":"macro-yr3d5pt","name":"Yeni Makro","description":"Kullanıcı tanımlı makro","enabled":true,"triggerKey":"KEY_A","triggerMode":"ONCE","repeatCount":1,"actions":[{"id":"act-1","type":"KEY_TAP","key":"KEY_X","delayMs":20},{"id":"act-2","type":"DELAY","delayMs":40,"jitterMs":2},{"id":"act-fe26ncx","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-8i710su","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-93gxpmh","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-ar49xhc","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-6hou3hh","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-arhp3t0","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-dvatjb8","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-y60omil","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-qircjy0","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-tdvknfk","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-up7xewj","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-xrzdr6n","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-rn63mnz","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-8kjt2c4","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-5r2yzwp","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-e8ajn17","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-u6srr2t","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-37r7neq","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-1mka5fl","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-j6j9ypu","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-6fk2ujv","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-q7w6e3j","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"},{"id":"act-71ltn10","type":"TEXT","delayMs":20,"jitterMs":2,"text":"Selam CachyOS!"}],"tags":["Özel"],"createdAt":1793269706930,"updatedAt":1793269706930}]}"#).unwrap()
+        println!(
+            "[BİLGİ] {} bulunamadı, varsayılan profil yükleniyor.",
+            config_path.display()
+        );
+        default_profile()
+    }
+}
+
+/// `--test-macro <id>`: arayüzün "Makroyu Test Et" düğmesi için tek seferlik
+/// çalıştırma. Kilit alınmaz, fiziksel aygıtlar dinlenmez; yalnızca eylemler
+/// geçici bir sanal aygıt üzerinden icra edilir.
+fn run_test_macro(profile: &ProfileConfig, macro_id: &str) -> i32 {
+    if fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/uinput")
+        .is_err()
+    {
+        eprintln!(
+            "[HATA] /dev/uinput yazılabilir değil. Arayüzdeki 'İzinleri Düzelt' düğmesini kullanın."
+        );
+        return 2;
+    }
+
+    let Some(m) = profile
+        .macros
+        .iter()
+        .find(|m| m.id == macro_id || m.name == macro_id)
+    else {
+        eprintln!("[HATA] Test edilecek makro bulunamadı: {}", macro_id);
+        return 3;
     };
+
+    let mut actions = m.actions.clone();
+    actions.extend(m.release_actions.iter().cloned());
+    if actions.is_empty() {
+        eprintln!("[HATA] '{}' makrosunda eylem yok.", m.name);
+        return 4;
+    }
+
+    println!(
+        "[TEST] '{}' makrosu çalıştırılıyor ({} eylem).",
+        m.name,
+        actions.len()
+    );
+    let vdev = Arc::new(Mutex::new(create_virtual_device("MacroStat Test Engine")));
+    let pressed = Arc::new(Mutex::new(HashSet::new()));
+    let completed = execute_macro_actions(&actions, &vdev, &pressed, None);
+    {
+        let mut dev = vdev.lock().unwrap();
+        let mut keys = pressed.lock().unwrap();
+        release_all_keys(&mut dev, &mut keys);
+    }
+    if completed {
+        println!("[TEST] Tamamlandı.");
+        0
+    } else {
+        eprintln!("[TEST] Test iptal edildi.");
+        5
+    }
+}
+
+fn main() {
+    // Linux PR_SET_PDEATHSIG: Ana GUI kapandığında kernel bu motoru SIGTERM ile uyarır.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+        // SIGTERM/SIGINT temiz kapanışa dönüştürülür; basılı tuşlar serbest bırakılır.
+        libc::signal(
+            libc::SIGTERM,
+            handle_termination as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            handle_termination as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
+        // SIGUSR1: profili yeniden başlatmadan tazele.
+        libc::signal(
+            libc::SIGUSR1,
+            handle_reload as extern "C" fn(libc::c_int) as libc::sighandler_t,
+        );
+    }
+
+    if unsafe { libc::getppid() } == 1 {
+        eprintln!("[HATA] Ana süreç bulunamadı; motor başlatılmadı.");
+        std::process::exit(0);
+    }
+
+    // Argümanlar: [--test-macro <id>] [profil.json]
+    let raw_args: Vec<String> = std::env::args().collect();
+    let mut test_macro_id: Option<String> = None;
+    let mut config_arg: Option<String> = None;
+    let mut args_iter = raw_args.iter().skip(1);
+    while let Some(arg) = args_iter.next() {
+        if arg == "--test-macro" {
+            test_macro_id = args_iter.next().cloned();
+        } else if !arg.starts_with("--") {
+            config_arg = Some(arg.clone());
+        }
+    }
+    let config_path = config_arg
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.exists())
+        .or_else(|| {
+            std::env::var_os("CACHYMACRO_PROFILE")
+                .map(std::path::PathBuf::from)
+                .filter(|path| path.exists())
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("profile.json"));
+
+    let mut profile: ProfileConfig = load_profile_file(&config_path);
+
+    // Test modu kilit/aygıt taraması yapmadan tek makroyu çalıştırır.
+    if let Some(macro_id) = &test_macro_id {
+        std::process::exit(run_test_macro(&profile, macro_id));
+    }
+
+    // Kilit süreç boyunca tutulur (_lock_file kapsam dışına çıkmaz).
+    let _lock_file = acquire_single_instance_lock();
+
+    println!("=======================================================");
+    println!("  MacroStat Daemon - Linux (CachyOS/KDE) Makro Motoru ");
+    println!("  Wayland & X11 | Panic Switch: profil / KEY_PAUSE ");
+    println!("=======================================================");
 
     println!("[HAZIR] Yüklenen Profil: {}", profile.name);
     for m in &profile.macros {
-        println!("  -> [{}] '{}' (Tetikleyici: {} | Mod: {:?})", if m.enabled { "AKTİF" } else { "KAPALI" }, m.name, m.trigger_key, m.trigger_mode);
+        println!(
+            "  -> [{}] '{}' (Tetikleyici: {} | Mod: {:?})",
+            if m.enabled { "AKTİF" } else { "KAPALI" },
+            m.name,
+            m.trigger_key,
+            m.trigger_mode
+        );
     }
+
+    let mut compiled_macros = compile_macros(&profile);
+    println!(
+        "[HAZIR] {} etkin tetikleyici derlendi.",
+        compiled_macros.len()
+    );
 
     let virtual_device = create_virtual_device(&profile.virtual_device_name);
     let vdev_arc = Arc::new(Mutex::new(virtual_device));
     let pressed_keys_arc = Arc::new(Mutex::new(HashSet::new()));
     let physical_held_keys_arc: Arc<RwLock<HashSet<Key>>> = Arc::new(RwLock::new(HashSet::new()));
-    let running_toggles: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> = Arc::new(Mutex::new(HashMap::new()));
-    let double_tap_tracker: Arc<Mutex<HashMap<Key, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    let running_toggles: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let double_tap_tracker: Arc<Mutex<HashMap<String, (Instant, u64)>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
-    let (mut devices, mut perm_denied) = discover_devices();
+    let (mut devices, mut perm_denied) = discover_devices(true);
     while devices.is_empty() {
-        // Ana GUI kapandıysa bekleme döngüsünden çık
-        if unsafe { libc::getppid() } == 1 {
+        if SHUTDOWN.load(Ordering::SeqCst) || unsafe { libc::getppid() } == 1 {
             return;
         }
         if perm_denied > 0 {
@@ -764,7 +1249,7 @@ fn main() {
             eprintln!("Arayüzdeki 'Donanım İzinlerini Düzelt' butonuna tıklayın.");
         }
         thread::sleep(Duration::from_millis(1500));
-        let (d, p) = discover_devices();
+        let (d, p) = discover_devices(false);
         devices = d;
         perm_denied = p;
     }
@@ -778,306 +1263,447 @@ fn main() {
         })
         .collect();
 
-    let panic_key_val = string_to_key(&profile.panic_key).unwrap_or(Key::KEY_PAUSE);
+    let mut panic_key_val = string_to_key(&profile.panic_key).unwrap_or(Key::KEY_PAUSE);
+    let inotify_fd = setup_input_watch();
     let mut last_scan = Instant::now();
+    // Kombinasyon mandalı: tuşlardan biri bırakılmadan aynı kombinasyon tekrar ateşlenmez.
+    let mut latched_combos: HashSet<String> = HashSet::new();
+    // PRESS_AND_RELEASE makrolarında bırakış eylemlerinin bir kez çalışmasını sağlar.
+    let mut press_release_armed: HashSet<String> = HashSet::new();
 
     loop {
-        // 1. Ana uygulama kapandıysa makro motoru derhal sonlansın
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            println!("[MacroStat Motor] Kapanış sinyali alındı. Motor kapatılıyor.");
+            break;
+        }
         if unsafe { libc::getppid() } == 1 {
             println!("[MacroStat Motor] Ana uygulama sonlandırıldı. Motor kapatılıyor.");
             break;
         }
 
-        // 2. Poll ile donanım olaylarını 200ms zaman aşımıyla dinle
-        let ret = unsafe {
-            libc::poll(
-                poll_fds.as_mut_ptr(),
-                poll_fds.len() as libc::nfds_t,
-                200,
-            )
-        };
+        // 3. GUI'den SIGUSR1 geldiyse profili yeniden başlatmadan tazele.
+        if RELOAD.swap(false, Ordering::SeqCst) {
+            match fs::read_to_string(&config_path)
+                .ok()
+                .and_then(|c| parse_profile(&c))
+            {
+                Some(new_profile) => {
+                    {
+                        let toggles = running_toggles.lock().unwrap();
+                        for flag in toggles.values() {
+                            flag.store(false, Ordering::SeqCst);
+                        }
+                    }
+                    running_toggles.lock().unwrap().clear();
+                    {
+                        let mut dev = vdev_arc.lock().unwrap();
+                        let mut pressed = pressed_keys_arc.lock().unwrap();
+                        release_all_keys(&mut dev, &mut pressed);
+                    }
+                    latched_combos.clear();
+                    press_release_armed.clear();
+                    double_tap_tracker.lock().unwrap().clear();
 
-        // 3. Hata veya zaman aşımında aygıtları yeniden tara
-        let has_err = poll_fds.iter().any(|pfd| pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0);
-        if has_err || last_scan.elapsed() > Duration::from_secs(4) {
+                    if new_profile.virtual_device_name != profile.virtual_device_name {
+                        println!("[YENİLE] Sanal aygıt adı değişikliği bir sonraki motor başlatmasında uygulanacak.");
+                    }
+                    panic_key_val = string_to_key(&new_profile.panic_key).unwrap_or(Key::KEY_PAUSE);
+                    compiled_macros = compile_macros(&new_profile);
+                    println!(
+                        "[YENİLE] Profil yeniden yüklendi: '{}' ({} etkin tetikleyici)",
+                        new_profile.name,
+                        compiled_macros.len()
+                    );
+                    profile = new_profile;
+                }
+                None => eprintln!("[YENİLE] Profil okunamadı; mevcut yapılandırma korunuyor."),
+            }
+        }
+
+        let ret = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as libc::nfds_t, 200) };
+
+        let has_err = poll_fds
+            .iter()
+            .any(|pfd| pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0);
+
+        // Aygıt eklendi/çıkarıldı ya da bir fd bozuldu: listeyi yenile.
+        // inotify yoksa geriye dönük olarak 4 sn'de bir yokla.
+        let fallback_scan = inotify_fd < 0 && last_scan.elapsed() > Duration::from_secs(4);
+        if drain_input_watch(inotify_fd) || has_err || fallback_scan {
             last_scan = Instant::now();
-            let (new_devs, _) = discover_devices();
-            if !new_devs.is_empty() && (new_devs.len() != devices.len() || has_err) {
-                devices = new_devs;
-                poll_fds = devices.iter().map(|d| libc::pollfd {
+            devices = discover_devices(false).0;
+            poll_fds = devices
+                .iter()
+                .map(|d| libc::pollfd {
                     fd: d.as_raw_fd(),
                     events: libc::POLLIN,
                     revents: 0,
-                }).collect();
-                continue;
-            }
+                })
+                .collect();
+            continue;
         }
 
         if ret > 0 {
             for (i, pfd) in poll_fds.iter().enumerate() {
-                if pfd.revents & libc::POLLIN != 0 {
-                    if let Ok(events) = devices[i].fetch_events() {
-                        for ev in events {
-                            if ev.event_type() == EventType::KEY {
-                                let key = Key::new(ev.code());
-                                let is_press = ev.value() == 1;
-                                let is_release = ev.value() == 0;
+                if pfd.revents & libc::POLLIN == 0 {
+                    continue;
+                }
+                if let Ok(events) = devices[i].fetch_events() {
+                    for ev in events {
+                        if ev.event_type() != EventType::KEY {
+                            continue;
+                        }
+                        let key = Key::new(ev.code());
+                        let is_press = ev.value() == 1;
+                        let is_release = ev.value() == 0;
 
-                                if is_press {
-                                    physical_held_keys_arc.write().unwrap().insert(key);
-                                } else if is_release {
-                                    physical_held_keys_arc.write().unwrap().remove(&key);
+                        if is_press {
+                            physical_held_keys_arc.write().unwrap().insert(key);
+                        } else if is_release {
+                            physical_held_keys_arc.write().unwrap().remove(&key);
+                            // Bırakılan tuşu içeren kombinasyon mandalları açılır.
+                            latched_combos.retain(|macro_id| {
+                                compiled_macros
+                                    .iter()
+                                    .find(|m| &m.id == macro_id)
+                                    .is_some_and(|m| {
+                                        !m.combo.iter().any(|k| keys_are_equivalent(*k, key))
+                                    })
+                            });
+                        }
+
+                        if is_press && keys_are_equivalent(key, panic_key_val) {
+                            println!(
+                                "\n[STOP] Acil durdurma tetiklendi! Tüm makrolar sonlandırıldı."
+                            );
+                            PANIC_STOP.store(true, Ordering::SeqCst);
+                            {
+                                let mut toggles = running_toggles.lock().unwrap();
+                                for flag in toggles.values() {
+                                    flag.store(false, Ordering::SeqCst);
                                 }
+                                toggles.clear();
+                            }
+                            {
+                                let mut dev = vdev_arc.lock().unwrap();
+                                let mut pressed = pressed_keys_arc.lock().unwrap();
+                                release_all_keys(&mut dev, &mut pressed);
+                            }
+                            println!("[STOP] Makro motoru durduruldu. Arayüzden yeniden başlatılana kadar makrolar çalışmayacaktır.");
+                            std::process::exit(0);
+                        }
 
-                                if keys_are_equivalent(key, panic_key_val) && is_press {
-                                    println!("\n[STOP] Acil durdurma tetiklendi! Tüm makrolar sonlandırıldı.");
-                                    PANIC_STOP.store(true, Ordering::SeqCst);
-                                    let mut toggles = running_toggles.lock().unwrap();
-                                    for flag in toggles.values() {
-                                        flag.store(false, Ordering::SeqCst);
-                                    }
-                                    toggles.clear();
-                                    drop(toggles);
-
-                                    let mut dev = vdev_arc.lock().unwrap();
-                                    let mut pressed = pressed_keys_arc.lock().unwrap();
-                                    release_all_keys(&mut dev, &mut pressed);
-                                    println!("[STOP] Makro motoru durduruldu. Arayüzden yeniden başlatılana kadar makrolar çalışmayacaktır.");
-                                    std::process::exit(0);
-                                }
-
-                                for m in &profile.macros {
-                                    if !m.enabled { continue; }
-
-                                    let trigger_match = if m.trigger_key.contains('+') {
-                                        let parts: Vec<&str> = m.trigger_key.split('+').map(|s| s.trim()).collect();
-                                        let combo_keys: Vec<Option<Key>> = parts.iter().map(|p| string_to_key(p)).collect();
-                                        if combo_keys.iter().all(|k| k.is_some()) {
-                                            let keys_vec: Vec<Key> = combo_keys.into_iter().map(|k| k.unwrap()).collect();
-                                            let held = physical_held_keys_arc.read().unwrap();
-                                            is_press && keys_vec.iter().any(|k| keys_are_equivalent(*k, key)) && keys_vec.iter().all(|k| held.iter().any(|h| keys_are_equivalent(*k, *h)))
-                                        } else {
-                                            false
-                                        }
-                                    } else if let Some(t_key) = string_to_key(&m.trigger_key) {
-                                        keys_are_equivalent(t_key, key) && is_press
-                                    } else {
-                                        false
-                                    };
-
-                                    if trigger_match {
-                                        println!("[MacroStat Tetiklendi] '{}' yürütülüyor (Tetikleyici: {} | Mod: {:?})", m.name, m.trigger_key, m.trigger_mode);
-                                        let actions_clone = m.actions.clone();
-                                        let vdev_clone = Arc::clone(&vdev_arc);
-                                        let pressed_clone = Arc::clone(&pressed_keys_arc);
-                                        let mode = m.trigger_mode.clone();
-                                        let repeat = m.repeat_count;
-                                        let macro_name = m.name.clone();
-
-                                        match mode {
-                                            TriggerMode::ONCE => {
-                                                println!("[MacroStat Tetiklendi] '{}' yürütülüyor (Tetikleyici: {} | Mod: ONCE)", m.name, m.trigger_key);
-                                                thread::spawn(move || {
-                                                    execute_macro_actions(&actions_clone, &vdev_clone, &pressed_clone, None);
-                                                    println!("[MacroStat Tamamlandı] '{}' başarıyla tamamlandı.", macro_name);
-                                                });
-                                            }
-                                            TriggerMode::REPEAT_COUNT => {
-                                                let macro_id_key = if !m.id.is_empty() { m.id.clone() } else { format!("trigger_{}", m.trigger_key) };
-                                                let mut toggles = running_toggles.lock().unwrap();
-                                                if let Some(flag) = toggles.get(&macro_id_key) {
-                                                    if flag.load(Ordering::SeqCst) {
-                                                        println!("[TEKRAR DURDURULDU] Tetikleyiciye tekrar basıldı, makro durduruldu: '{}'", m.name);
-                                                        flag.store(false, Ordering::SeqCst);
-                                                        toggles.remove(&macro_id_key);
-                                                        drop(toggles);
-
-                                                        let mut dev = vdev_arc.lock().unwrap();
-                                                        let mut pressed = pressed_keys_arc.lock().unwrap();
-                                                        release_all_keys(&mut dev, &mut pressed);
-                                                        continue;
-                                                    }
-                                                }
-                                                println!("[MacroStat Tetiklendi] '{}' başlatıldı ({} Tekrar)", m.name, repeat);
-                                                let flag = Arc::new(AtomicBool::new(true));
-                                                toggles.insert(macro_id_key.clone(), Arc::clone(&flag));
-                                                drop(toggles);
-
-                                                let flag_clone = Arc::clone(&flag);
-                                                let toggles_ref = Arc::clone(&running_toggles);
-                                                let key_str = macro_id_key.clone();
-                                                let vdev_c = Arc::clone(&vdev_clone);
-                                                let pressed_c = Arc::clone(&pressed_keys_arc);
-                                                thread::spawn(move || {
-                                                    for rep in 0..repeat {
-                                                        if PANIC_STOP.load(Ordering::SeqCst) || !flag_clone.load(Ordering::SeqCst) { break; }
-                                                        if !execute_macro_actions(&actions_clone, &vdev_c, &pressed_c, Some(&flag_clone)) {
-                                                            break;
-                                                        }
-                                                        println!("[MacroStat Tekrar {}/{}] '{}'", rep + 1, repeat, macro_name);
-                                                    }
-                                                    flag_clone.store(false, Ordering::SeqCst);
-                                                    let mut t = toggles_ref.lock().unwrap();
-                                                    t.remove(&key_str);
-                                                    drop(t);
-                                                    let mut dev = vdev_c.lock().unwrap();
-                                                    let mut pressed = pressed_c.lock().unwrap();
-                                                    release_all_keys(&mut dev, &mut pressed);
-                                                    println!("[MacroStat Tamamlandı] '{}' tüm tekrarlar tamamlandı.", macro_name);
-                                                });
-                                            }
-                                            TriggerMode::TOGGLE_LOOP => {
-                                                let macro_id_key = if !m.id.is_empty() { m.id.clone() } else { format!("trigger_{}", m.trigger_key) };
-                                                let mut toggles = running_toggles.lock().unwrap();
-                                                if let Some(flag) = toggles.get(&macro_id_key) {
-                                                    if flag.load(Ordering::SeqCst) {
-                                                        println!("[DÖNGÜ KAPATILDI] Tetikleyiciye tekrar basıldı, makro durduruldu: '{}'", m.name);
-                                                        flag.store(false, Ordering::SeqCst);
-                                                        toggles.remove(&macro_id_key);
-                                                        drop(toggles);
-
-                                                        let mut dev = vdev_arc.lock().unwrap();
-                                                        let mut pressed = pressed_keys_arc.lock().unwrap();
-                                                        release_all_keys(&mut dev, &mut pressed);
-                                                        continue;
-                                                    }
-                                                }
-                                                println!("[DÖNGÜ BAŞLATILDI] Makro: '{}'", m.name);
-                                                let flag = Arc::new(AtomicBool::new(true));
-                                                toggles.insert(macro_id_key.clone(), Arc::clone(&flag));
-                                                drop(toggles);
-
-                                                let flag_clone = Arc::clone(&flag);
-                                                let name_clone = m.name.clone();
-                                                let toggles_ref = Arc::clone(&running_toggles);
-                                                let key_str = macro_id_key.clone();
-                                                let vdev_c = Arc::clone(&vdev_clone);
-                                                let pressed_c = Arc::clone(&pressed_keys_arc);
-                                                thread::spawn(move || {
-                                                    while flag_clone.load(Ordering::SeqCst) && !PANIC_STOP.load(Ordering::SeqCst) {
-                                                        if !execute_macro_actions(&actions_clone, &vdev_c, &pressed_c, Some(&flag_clone)) {
-                                                            break;
-                                                        }
-                                                        if !flag_clone.load(Ordering::SeqCst) || PANIC_STOP.load(Ordering::SeqCst) {
-                                                            break;
-                                                        }
-                                                        if !cancellable_sleep(5, 0, Some(&flag_clone)) {
-                                                            break;
-                                                        }
-                                                    }
-                                                    {
-                                                        let mut dev = vdev_c.lock().unwrap();
-                                                        let mut pressed = pressed_c.lock().unwrap();
-                                                        release_all_keys(&mut dev, &mut pressed);
-                                                    }
-                                                    {
-                                                        let mut t = toggles_ref.lock().unwrap();
-                                                        t.remove(&key_str);
-                                                    }
-                                                    println!("[DÖNGÜ SONLANDI] '{}'", name_clone);
-                                                });
-                                            }
-                                            TriggerMode::WHILE_HELD => {
-                                                let held_arc_clone = Arc::clone(&physical_held_keys_arc);
-                                                let required_keys: Vec<Key> = if m.trigger_key.contains('+') {
-                                                    m.trigger_key.split('+').filter_map(|s| string_to_key(s.trim())).collect()
-                                                } else {
-                                                    string_to_key(&m.trigger_key).into_iter().collect()
-                                                };
-                                                let name_clone = m.name.clone();
-                                                let vdev_c = Arc::clone(&vdev_clone);
-                                                let pressed_c = Arc::clone(&pressed_clone);
-                                                let stop_flag = Arc::new(AtomicBool::new(true));
-                                                let stop_flag_c = Arc::clone(&stop_flag);
-
-                                                thread::spawn(move || {
-                                                    while !PANIC_STOP.load(Ordering::SeqCst) && stop_flag_c.load(Ordering::SeqCst) {
-                                                        {
-                                                            let held = held_arc_clone.read().unwrap();
-                                                            if !required_keys.iter().all(|k| held.iter().any(|h| keys_are_equivalent(*k, *h))) {
-                                                                break;
-                                                            }
-                                                        }
-                                                        if !execute_macro_actions(&actions_clone, &vdev_c, &pressed_c, Some(&stop_flag_c)) {
-                                                            break;
-                                                        }
-                                                        if !cancellable_sleep(5, 0, Some(&stop_flag_c)) {
-                                                            break;
-                                                        }
-                                                    }
-                                                    {
-                                                        let mut dev = vdev_c.lock().unwrap();
-                                                        let mut pressed = pressed_c.lock().unwrap();
-                                                        release_all_keys(&mut dev, &mut pressed);
-                                                    }
-                                                    println!("[BASILI TUTMA BIRAKILDI] '{}' durduruldu.", name_clone);
-                                                });
-                                            }
-                                            TriggerMode::DOUBLE_TAP => {
-                                                let now = Instant::now();
-                                                let mut tracker = double_tap_tracker.lock().unwrap();
-                                                let window_ms = m.double_tap_timeout_ms;
-                                                let is_double = if let Some(last_time) = tracker.get(&key) {
-                                                    last_time.elapsed() <= Duration::from_millis(window_ms)
-                                                } else {
-                                                    false
-                                                };
-
-                                                if is_double {
-                                                    tracker.remove(&key);
-                                                    drop(tracker);
-                                                    println!("[ÇİFT DOKUNMA] '{}' yürütülüyor (Pencere: {}ms)", m.name, window_ms);
-                                                    thread::spawn(move || {
-                                                        execute_macro_actions(&actions_clone, &vdev_clone, &pressed_clone, None);
-                                                        println!("[MacroStat Tamamlandı] '{}' çift dokunma tamamlandı.", macro_name);
-                                                    });
-                                                } else {
-                                                    tracker.insert(key, now);
-                                                }
-                                            }
-                                            TriggerMode::HOLD_LONG_PRESS => {
-                                                let held_c = Arc::clone(&physical_held_keys_arc);
-                                                let hold_ms = m.hold_duration_ms;
-                                                thread::spawn(move || {
-                                                    thread::sleep(Duration::from_millis(hold_ms));
-                                                    if PANIC_STOP.load(Ordering::SeqCst) { return; }
-                                                    let is_still_held = held_c.read().unwrap().contains(&key);
-                                                    if is_still_held {
-                                                        println!("[UZUN BASIM] '{}' yürütülüyor (Eşik: {}ms)", macro_name, hold_ms);
-                                                        execute_macro_actions(&actions_clone, &vdev_clone, &pressed_clone, None);
-                                                        println!("[MacroStat Tamamlandı] '{}' uzun basım tamamlandı.", macro_name);
-                                                    }
-                                                });
-                                            }
-                                            TriggerMode::PRESS_AND_RELEASE => {
-                                                println!("[ÇİFT EYLEM: BASILDI] '{}' yürütülüyor", m.name);
-                                                thread::spawn(move || {
-                                                    execute_macro_actions(&actions_clone, &vdev_clone, &pressed_clone, None);
-                                                });
-                                            }
-                                        }
+                        if is_press {
+                            let mut matches = Vec::new();
+                            {
+                                let held = physical_held_keys_arc.read().unwrap();
+                                for m in &compiled_macros {
+                                    if trigger_matches(m, key, is_press, &held) {
+                                        matches.push(m);
                                     }
                                 }
+                            }
 
-                                if is_release {
-                                    for m in &profile.macros {
-                                        if !m.enabled || m.trigger_mode != TriggerMode::PRESS_AND_RELEASE { continue; }
-                                        let trigger_matches = if let Some(t_key) = string_to_key(&m.trigger_key) {
-                                            keys_are_equivalent(t_key, key)
+                            for m in matches {
+                                if !m.combo.is_empty() && latched_combos.contains(&m.id) {
+                                    continue;
+                                }
+                                if !m.combo.is_empty() {
+                                    latched_combos.insert(m.id.clone());
+                                }
+
+                                let macro_config = &profile.macros[m.action_index];
+                                let actions_clone = macro_config.actions.clone();
+                                let vdev_clone = Arc::clone(&vdev_arc);
+                                let pressed_clone = Arc::clone(&pressed_keys_arc);
+                                let mode = m.mode.clone();
+                                let is_repeat = mode == TriggerMode::REPEAT_COUNT;
+                                let repeat = m.repeat_count;
+                                let macro_name = m.name.clone();
+                                let macro_id_key = m.id.clone();
+
+                                println!(
+                                    "[MacroStat Tetiklendi] '{}' yürütülüyor (Tetikleyici: {} | Mod: {:?})",
+                                    macro_name, m.trigger_key, mode
+                                );
+
+                                match mode {
+                                    TriggerMode::ONCE => {
+                                        thread::spawn(move || {
+                                            execute_macro_actions(
+                                                &actions_clone,
+                                                &vdev_clone,
+                                                &pressed_clone,
+                                                None,
+                                            );
+                                            println!(
+                                                "[MacroStat Tamamlandı] '{}' başarıyla tamamlandı.",
+                                                macro_name
+                                            );
+                                        });
+                                    }
+                                    TriggerMode::REPEAT_COUNT | TriggerMode::TOGGLE_LOOP => {
+                                        let mut toggles = running_toggles.lock().unwrap();
+                                        if let Some(flag) = toggles.get(&macro_id_key) {
+                                            if flag.load(Ordering::SeqCst) {
+                                                println!("[DÖNGÜ KAPATILDI] Tetikleyiciye tekrar basıldı, makro durduruldu: '{}'", macro_name);
+                                                flag.store(false, Ordering::SeqCst);
+                                                toggles.remove(&macro_id_key);
+                                                drop(toggles);
+                                                let mut dev = vdev_arc.lock().unwrap();
+                                                let mut pressed = pressed_keys_arc.lock().unwrap();
+                                                release_all_keys(&mut dev, &mut pressed);
+                                                continue;
+                                            }
+                                        }
+                                        let flag = Arc::new(AtomicBool::new(true));
+                                        toggles.insert(macro_id_key.clone(), Arc::clone(&flag));
+                                        drop(toggles);
+
+                                        if is_repeat {
+                                            println!("[MacroStat Tetiklendi] '{}' başlatıldı ({} Tekrar)", macro_name, repeat);
                                         } else {
-                                            false
+                                            println!("[DÖNGÜ BAŞLATILDI] Makro: '{}'", macro_name);
+                                        }
+
+                                        let flag_clone = Arc::clone(&flag);
+                                        let toggles_ref = Arc::clone(&running_toggles);
+                                        let key_str = macro_id_key.clone();
+                                        let vdev_c = Arc::clone(&vdev_clone);
+                                        let pressed_c = Arc::clone(&pressed_keys_arc);
+
+                                        thread::spawn(move || {
+                                            let mut rep: u32 = 0;
+                                            while flag_clone.load(Ordering::SeqCst)
+                                                && !PANIC_STOP.load(Ordering::SeqCst)
+                                                && !SHUTDOWN.load(Ordering::SeqCst)
+                                            {
+                                                if !execute_macro_actions(
+                                                    &actions_clone,
+                                                    &vdev_c,
+                                                    &pressed_c,
+                                                    Some(&flag_clone),
+                                                ) {
+                                                    break;
+                                                }
+                                                rep += 1;
+                                                if is_repeat {
+                                                    println!(
+                                                        "[MacroStat Tekrar {}/{}] '{}'",
+                                                        rep, repeat, macro_name
+                                                    );
+                                                    if rep >= repeat {
+                                                        break;
+                                                    }
+                                                }
+                                                if !cancellable_sleep(5, 0, Some(&flag_clone)) {
+                                                    break;
+                                                }
+                                            }
+                                            {
+                                                let mut dev = vdev_c.lock().unwrap();
+                                                let mut pressed = pressed_c.lock().unwrap();
+                                                release_all_keys(&mut dev, &mut pressed);
+                                            }
+                                            {
+                                                let mut t = toggles_ref.lock().unwrap();
+                                                t.remove(&key_str);
+                                            }
+                                            if is_repeat {
+                                                println!("[MacroStat Tamamlandı] '{}' tüm tekrarlar tamamlandı.", macro_name);
+                                            } else {
+                                                println!("[DÖNGÜ SONLANDI] '{}'", macro_name);
+                                            }
+                                        });
+                                    }
+                                    TriggerMode::WHILE_HELD => {
+                                        let held_arc_clone = Arc::clone(&physical_held_keys_arc);
+                                        let required_keys: Vec<Key> = if m.combo.is_empty() {
+                                            m.single.into_iter().collect()
+                                        } else {
+                                            m.combo.clone()
                                         };
-                                        if trigger_matches && !m.release_actions.is_empty() {
-                                            println!("[ÇİFT EYLEM: BIRAKILDI] '{}' bırakış eylemleri yürütülüyor", m.name);
-                                            let release_clone = m.release_actions.clone();
-                                            let vdev_c = Arc::clone(&vdev_arc);
-                                            let pressed_c = Arc::clone(&pressed_keys_arc);
-                                            thread::spawn(move || {
-                                                execute_macro_actions(&release_clone, &vdev_c, &pressed_c, None);
+                                        let name_clone = macro_name.clone();
+                                        let vdev_c = Arc::clone(&vdev_clone);
+                                        let pressed_c = Arc::clone(&pressed_clone);
+                                        let stop_flag = Arc::new(AtomicBool::new(true));
+                                        let stop_flag_c = Arc::clone(&stop_flag);
+
+                                        thread::spawn(move || {
+                                            while !PANIC_STOP.load(Ordering::SeqCst)
+                                                && !SHUTDOWN.load(Ordering::SeqCst)
+                                                && stop_flag_c.load(Ordering::SeqCst)
+                                            {
+                                                {
+                                                    let held = held_arc_clone.read().unwrap();
+                                                    if !required_keys.iter().all(|k| {
+                                                        held.iter()
+                                                            .any(|h| keys_are_equivalent(*k, *h))
+                                                    }) {
+                                                        break;
+                                                    }
+                                                }
+                                                if !execute_macro_actions(
+                                                    &actions_clone,
+                                                    &vdev_c,
+                                                    &pressed_c,
+                                                    Some(&stop_flag_c),
+                                                ) {
+                                                    break;
+                                                }
+                                                if !cancellable_sleep(5, 0, Some(&stop_flag_c)) {
+                                                    break;
+                                                }
+                                            }
+                                            {
+                                                let mut dev = vdev_c.lock().unwrap();
+                                                let mut pressed = pressed_c.lock().unwrap();
+                                                release_all_keys(&mut dev, &mut pressed);
+                                            }
+                                            println!(
+                                                "[BASILI TUTMA BIRAKILDI] '{}' durduruldu.",
+                                                name_clone
+                                            );
+                                        });
+                                    }
+                                    TriggerMode::DOUBLE_TAP => {
+                                        let now = Instant::now();
+                                        let tracker_key =
+                                            format!("{}:{}", m.id, canonical_key_id(key));
+                                        let mut tracker = double_tap_tracker.lock().unwrap();
+                                        // Eski kayıtlar birikmesin; saklama süresi makronun penceresinden kısa olamaz.
+                                        tracker.retain(|_, (t, window_ms)| {
+                                            t.elapsed()
+                                                < Duration::from_secs(5)
+                                                    .max(Duration::from_millis(*window_ms))
+                                        });
+                                        let is_double =
+                                            tracker.get(&tracker_key).is_some_and(|(last, _)| {
+                                                last.elapsed()
+                                                    <= Duration::from_millis(m.double_tap_ms)
                                             });
+
+                                        if is_double {
+                                            tracker.remove(&tracker_key);
+                                            drop(tracker);
+                                            println!(
+                                                "[ÇİFT DOKUNMA] '{}' yürütülüyor (Pencere: {}ms)",
+                                                macro_name, m.double_tap_ms
+                                            );
+                                            thread::spawn(move || {
+                                                execute_macro_actions(
+                                                    &actions_clone,
+                                                    &vdev_clone,
+                                                    &pressed_clone,
+                                                    None,
+                                                );
+                                                println!("[MacroStat Tamamlandı] '{}' çift dokunma tamamlandı.", macro_name);
+                                            });
+                                        } else {
+                                            tracker.insert(tracker_key, (now, m.double_tap_ms));
                                         }
                                     }
+                                    TriggerMode::HOLD_LONG_PRESS => {
+                                        let held_c = Arc::clone(&physical_held_keys_arc);
+                                        let hold_ms = m.hold_ms;
+                                        thread::spawn(move || {
+                                            let target = Duration::from_millis(hold_ms);
+                                            let start = Instant::now();
+                                            while start.elapsed() < target {
+                                                if PANIC_STOP.load(Ordering::SeqCst)
+                                                    || SHUTDOWN.load(Ordering::SeqCst)
+                                                {
+                                                    return;
+                                                }
+                                                let still_held = {
+                                                    let held = held_c.read().unwrap();
+                                                    held.iter()
+                                                        .any(|h| keys_are_equivalent(key, *h))
+                                                };
+                                                if !still_held {
+                                                    return;
+                                                }
+                                                let remaining =
+                                                    target.saturating_sub(start.elapsed());
+                                                thread::sleep(
+                                                    remaining.min(Duration::from_millis(10)),
+                                                );
+                                            }
+                                            let still_held = {
+                                                let held = held_c.read().unwrap();
+                                                held.iter().any(|h| keys_are_equivalent(key, *h))
+                                            };
+                                            if still_held {
+                                                println!(
+                                                    "[UZUN BASIM] '{}' yürütülüyor (Eşik: {}ms)",
+                                                    macro_name, hold_ms
+                                                );
+                                                execute_macro_actions(
+                                                    &actions_clone,
+                                                    &vdev_clone,
+                                                    &pressed_clone,
+                                                    None,
+                                                );
+                                                println!("[MacroStat Tamamlandı] '{}' uzun basım tamamlandı.", macro_name);
+                                            }
+                                        });
+                                    }
+                                    TriggerMode::PRESS_AND_RELEASE => {
+                                        if !profile.macros[m.action_index]
+                                            .release_actions
+                                            .is_empty()
+                                        {
+                                            press_release_armed.insert(m.id.clone());
+                                        }
+                                        println!(
+                                            "[ÇİFT EYLEM: BASILDI] '{}' yürütülüyor",
+                                            macro_name
+                                        );
+                                        thread::spawn(move || {
+                                            execute_macro_actions(
+                                                &actions_clone,
+                                                &vdev_clone,
+                                                &pressed_clone,
+                                                None,
+                                            );
+                                        });
+                                    }
                                 }
+                            }
+                        }
+
+                        if is_release {
+                            for m in &compiled_macros {
+                                if m.mode != TriggerMode::PRESS_AND_RELEASE {
+                                    continue;
+                                }
+                                let trigger_released = if let Some(single) = m.single {
+                                    keys_are_equivalent(single, key)
+                                } else {
+                                    m.combo.iter().any(|k| keys_are_equivalent(*k, key))
+                                };
+                                if !trigger_released || !press_release_armed.remove(&m.id) {
+                                    continue;
+                                }
+                                let release_actions =
+                                    profile.macros[m.action_index].release_actions.clone();
+                                if release_actions.is_empty() {
+                                    continue;
+                                }
+                                println!(
+                                    "[ÇİFT EYLEM: BIRAKILDI] '{}' bırakış eylemleri yürütülüyor",
+                                    m.name
+                                );
+                                let vdev_c = Arc::clone(&vdev_arc);
+                                let pressed_c = Arc::clone(&pressed_keys_arc);
+                                thread::spawn(move || {
+                                    execute_macro_actions(
+                                        &release_actions,
+                                        &vdev_c,
+                                        &pressed_c,
+                                        None,
+                                    );
+                                });
                             }
                         }
                     }
@@ -1090,5 +1716,118 @@ fn main() {
             }
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    // Temiz kapanış: basılı kalmış sanal tuş/fare düğmeleri serbest bırakılır.
+    PANIC_STOP.store(true, Ordering::SeqCst);
+    {
+        let toggles = running_toggles.lock().unwrap();
+        for flag in toggles.values() {
+            flag.store(false, Ordering::SeqCst);
+        }
+    }
+    {
+        let mut dev = vdev_arc.lock().unwrap();
+        let mut pressed = pressed_keys_arc.lock().unwrap();
+        release_all_keys(&mut dev, &mut pressed);
+    }
+    println!("[MacroStat Motor] Temiz kapanış tamamlandı.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_common_key_names() {
+        assert_eq!(string_to_key("KEY_A"), Some(Key::KEY_A));
+        assert_eq!(string_to_key("a"), Some(Key::KEY_A));
+        assert_eq!(string_to_key("MOUSE5"), Some(Key::BTN_EXTRA));
+        assert_eq!(string_to_key("CODE_30"), Some(Key::new(30)));
+        assert_eq!(string_to_key("bilinmeyen-tus"), None);
+    }
+
+    #[test]
+    fn left_and_right_modifiers_are_equivalent() {
+        assert!(keys_are_equivalent(Key::KEY_LEFTCTRL, Key::KEY_RIGHTCTRL));
+        assert!(keys_are_equivalent(Key::KEY_LEFTSHIFT, Key::KEY_RIGHTSHIFT));
+        assert!(keys_are_equivalent(Key::KEY_LEFTALT, Key::KEY_RIGHTALT));
+        assert!(!keys_are_equivalent(Key::KEY_LEFTCTRL, Key::KEY_LEFTSHIFT));
+        assert!(!keys_are_equivalent(Key::KEY_A, Key::KEY_B));
+    }
+
+    #[test]
+    fn wrapper_profile_selects_active_profile() {
+        let json = r#"{"schemaVersion":1,"activeProfileId":"b","profiles":[
+            {"id":"a","name":"A","panicKey":"KEY_PAUSE","macros":[]},
+            {"id":"b","name":"B","panicKey":"KEY_F9","macros":[
+                {"id":"m","name":"M","enabled":true,"triggerKey":"KEY_F8","triggerMode":"ONCE","actions":[]}]}]}"#;
+        let p = parse_profile(json).expect("wrapper ayrıştırılmalı");
+        assert_eq!(p.id, "b");
+        assert_eq!(p.panic_key, "KEY_F9");
+        assert_eq!(p.macros.len(), 1);
+    }
+
+    #[test]
+    fn legacy_single_profile_is_supported() {
+        let json = r#"{"id":"legacy","name":"Eski","panicKey":"KEY_PAUSE","macros":[]}"#;
+        let p = parse_profile(json).expect("tekil profil ayrıştırılmalı");
+        assert_eq!(p.id, "legacy");
+    }
+
+    #[test]
+    fn canonical_ids_group_modifier_sides() {
+        assert_eq!(
+            canonical_key_id(Key::KEY_LEFTCTRL),
+            canonical_key_id(Key::KEY_RIGHTCTRL)
+        );
+        assert_ne!(canonical_key_id(Key::KEY_A), canonical_key_id(Key::KEY_B));
+    }
+
+    #[test]
+    fn combo_matches_only_while_all_keys_held() {
+        let profile = ProfileConfig {
+            id: "p".into(),
+            name: "P".into(),
+            panic_key: "KEY_PAUSE".into(),
+            virtual_device_name: "V".into(),
+            macros: vec![MacroConfig {
+                id: "m".into(),
+                name: "M".into(),
+                enabled: true,
+                trigger_key: "KEY_LEFTSHIFT+KEY_LEFTCTRL".into(),
+                trigger_mode: TriggerMode::ONCE,
+                repeat_count: 1,
+                double_tap_timeout_ms: 300,
+                hold_duration_ms: 300,
+                release_actions: vec![],
+                actions: vec![],
+            }],
+        };
+        let compiled = compile_macros(&profile);
+        assert_eq!(compiled.len(), 1);
+
+        let mut held = HashSet::new();
+        held.insert(Key::KEY_LEFTCTRL);
+        assert!(!trigger_matches(
+            &compiled[0],
+            Key::KEY_LEFTCTRL,
+            true,
+            &held
+        ));
+
+        held.insert(Key::KEY_RIGHTSHIFT);
+        assert!(trigger_matches(
+            &compiled[0],
+            Key::KEY_RIGHTSHIFT,
+            true,
+            &held
+        ));
+        assert!(!trigger_matches(
+            &compiled[0],
+            Key::KEY_LEFTSHIFT,
+            false,
+            &held
+        ));
     }
 }
