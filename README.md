@@ -11,8 +11,9 @@ src/main.rs                    Tek motor kaynağı
 gui.py                         İnce giriş noktası
 macrostat/                     PyQt6 arayüzü: common, widgets, mixin modülleri, i18n
 assets/macrostat.svg           Uygulama simgesi
-profile.json                   Tek varsayılan profil şablonu (çoklu profil şeması)
-cachymacro-daemon              Derlenmiş motor (cargo build --release)
+assets/default_profile.json    Tek varsayılan profil şablonu (demolar kapalı)
+profile.json                   Şablonun eski yol için sembolik bağlantısı
+cachymacro-daemon              Derlenmiş motor (yerel; cargo build --release)
 install_all.sh                 Paket/udev kontrolü + derleme + kısayol
 baslat-arayuz.sh               Arayüzü başlatır
 build_appimage.sh              AppImage paketleyici

@@ -58,7 +58,7 @@ class CoreMixin:
                 print(f"[UYARI] profile.json okunamadı: {e}")
         # Depodaki tek kanonik profil şablonu; gömülü JSON kopyası yok.
         default_p = None
-        seed = SCRIPT_DIR / "profile.json"
+        seed = DEFAULT_PROFILE_PATH
         if seed.exists():
             try:
                 with open(seed, "r", encoding="utf-8") as f:

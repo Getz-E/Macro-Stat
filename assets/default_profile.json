@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "activeProfileId": "profile-cachy-default",
+  "profiles": [
+    {
+      "id": "profile-cachy-default",
+      "name": "MacroStat Varsayılan Profil",
+      "description": "CachyOS & KDE Plasma için donanım tabanlı sıfır gecikmeli makrolar. Varsayılan demolar güvenlik için devre dışıdır.",
+      "panicKey": "KEY_PAUSE",
+      "virtualDeviceName": "MacroStat Virtual Engine",
+      "defaultJitterMs": 2,
+      "macros": [
+        {
+          "id": "macro-burst-clicker",
+          "name": "Hızlı Tıklama (Demo)",
+          "description": "Etkinleştirildiğinde tetikleyici tuşta sol tık bas-çek yapar. Varsayılan olarak kapalıdır.",
+          "enabled": false,
+          "triggerKey": "KEY_F8",
+          "triggerMode": "TOGGLE_LOOP",
+          "repeatCount": 1,
+          "actions": [
+            {
+              "type": "MOUSE_CLICK",
+              "mouseButton": "BTN_LEFT",
+              "delayMs": 15,
+              "id": "act-1"
+            }
+          ],
+          "createdAt": 1793256333773,
+          "updatedAt": 1793256333773
+        },
+        {
+          "id": "macro-demo-x-tap",
+          "name": "X Tuşu (Demo)",
+          "description": "Etkinleştirildiğinde X tuşuna basıp 50 ms bekler. Varsayılan olarak kapalıdır.",
+          "enabled": false,
+          "triggerKey": "KEY_LEFTSHIFT+KEY_LEFTCTRL",
+          "triggerMode": "ONCE",
+          "repeatCount": 1,
+          "actions": [
+            {
+              "type": "KEY_TAP",
+              "key": "KEY_X",
+              "id": "act-1"
+            },
+            {
+              "type": "DELAY",
+              "delayMs": 50,
+              "jitterMs": 2,
+              "id": "act-2"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

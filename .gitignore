@@ -6,3 +6,6 @@ __pycache__/
 *.pyc
 *.bak
 *.tmp
+
+# Derlenmiş motor ikilisi (cargo build --release üretir)
+/cachymacro-daemon

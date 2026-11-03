@@ -39,7 +39,9 @@ chmod +x "$APPDIR/usr/bin/cachymacro-daemon"
 
 echo "📁 [3/4] Python GUI ve masaüstü bileşenleri hazırlanıyor..."
 cp gui.py "$APPDIR/usr/bin/"
-cp -r macrostat "$APPDIR/usr/bin/"
+# Yalnızca kaynak dosyalar: __pycache__ / bayat .pyc pakete girmesin.
+install -d "$APPDIR/usr/bin/macrostat"
+cp macrostat/*.py "$APPDIR/usr/bin/macrostat/"
 cp -r assets "$APPDIR/usr/bin/"
 cp profile.json "$APPDIR/usr/bin/"
 chmod +x "$APPDIR/usr/bin/gui.py"
@@ -69,8 +71,12 @@ export APPDIR="$SELF_DIR"
 export PATH="$SELF_DIR/usr/bin:$PATH"
 
 mkdir -p "$HOME/.config/cachymacro"
-if [ ! -f "$HOME/.config/cachymacro/profile.json" ] && [ -f "$SELF_DIR/usr/bin/profile.json" ]; then
-    cp "$SELF_DIR/usr/bin/profile.json" "$HOME/.config/cachymacro/profile.json"
+if [ ! -f "$HOME/.config/cachymacro/profile.json" ]; then
+    if [ -f "$SELF_DIR/usr/bin/assets/default_profile.json" ]; then
+        cp "$SELF_DIR/usr/bin/assets/default_profile.json" "$HOME/.config/cachymacro/profile.json"
+    elif [ -f "$SELF_DIR/usr/bin/profile.json" ]; then
+        cp "$SELF_DIR/usr/bin/profile.json" "$HOME/.config/cachymacro/profile.json"
+    fi
 fi
 
 # İzinler udev kuralıyla verilir (chmod 666 kullanılmaz).

@@ -125,6 +125,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent.parent
 LOG_FILE = Path("/tmp/cachymacro.log")
 PANIC_KEY = "KEY_PAUSE"
 
+def _default_profile_path():
+    """Tek kanonik profil şablonu; eski kök konum yalnızca yedektir."""
+    for candidate in (SCRIPT_DIR / "assets" / "default_profile.json",
+                      SCRIPT_DIR / "profile.json"):
+        if candidate.exists():
+            return candidate
+    return SCRIPT_DIR / "profile.json"
+
+DEFAULT_PROFILE_PATH = _default_profile_path()
+
 def locate_paths():
     """Tek kanonik ikili ve kullanıcı profil yolu. İlk açılışta depo profili tohumlanır."""
     candidates_bin = [
@@ -150,7 +160,7 @@ def locate_paths():
 
     profile_path = Path.home() / ".config" / "cachymacro" / "profile.json"
     if not profile_path.exists():
-        seed = SCRIPT_DIR / "profile.json"
+        seed = DEFAULT_PROFILE_PATH
         try:
             profile_path.parent.mkdir(parents=True, exist_ok=True)
             if seed.exists():

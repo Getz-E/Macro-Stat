@@ -27,7 +27,7 @@ else
 fi
 
 echo "📁 [2/6] Proje dosyaları doğrulanıyor..."
-for f in Cargo.toml src/main.rs gui.py profile.json baslat-arayuz.sh \
+for f in Cargo.toml src/main.rs gui.py assets/default_profile.json baslat-arayuz.sh \
          macrostat/__init__.py macrostat/i18n.py macrostat/settings.py \
          assets/macrostat.svg; do
     if [ ! -f "$f" ]; then
