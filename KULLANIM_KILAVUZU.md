@@ -61,15 +61,15 @@ chmod +x install_all.sh
 
 ## 🌐 Dil Seçimi (Türkçe / English)
 
-Başlık çubuğunun sağındaki **TR/EN** seçicisinden dili değiştirebilirsiniz.
+Başlık çubuğunun sağındaki **🌐** menüsünden dili değiştirebilirsiniz.
 Onay verdikten sonra arayüz otomatik yeniden başlar; tercih
 `~/.config/cachymacro/settings.json` dosyasında saklanır. Kaydedilmemiş
 değişiklikler için uygulama yeniden başlamadan önce sorar.
 
 ## 💾 Profil Yönetimi, Dışa/İçe Aktarma ve Yedek
 
-- **✏️ Yeniden adlandır / 🗑️ Sil:** Üst çubuktaki profil düğmeleri. Son kalan
-  profil silinemez; tüm eylemler onay ister.
+- **✏️ Yeniden adlandır / 🗑️ Sil:** Üst çubuktaki **⋯** profil menüsünden.
+  Son kalan profil silinemez; tüm eylemler onay ister.
 - **📤 Dışa aktar:** Yalnızca aktif profili veya tüm profilleri tek JSON dosyası
   olarak kaydeder.
 - **📥 İçe aktar:** Çoklu profil dosyasındaki profiller yeni kimliklerle eklenir;

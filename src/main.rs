@@ -897,7 +897,7 @@ fn drain_input_watch(fd: libc::c_int) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Depoya gömülü tek varsayılan profil kaynağı (release derlemesinde sabitlenir).
-const DEFAULT_PROFILE_JSON: &str = include_str!("../profile.json");
+const DEFAULT_PROFILE_JSON: &str = include_str!("../assets/default_profile.json");
 
 extern "C" fn handle_termination(_signal: libc::c_int) {
     // Sinyal işleyicisi yalnızca atomik bayrak yazar; temizlik ana döngüde yapılır.
@@ -1003,6 +1003,26 @@ struct CompiledMacro {
     double_tap_ms: u64,
     hold_ms: u64,
     action_index: usize,
+}
+
+/// stderr düzenli bir dosyaya yönlendirilmişse ve sınırı aştıysa dosyayı kırpar.
+/// GUI günlüğü açılışta döndürür; uzun süre açık kalan motor da kendi kendine kırpar.
+fn maybe_rotate_stderr_log(max_bytes: u64) {
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(libc::STDERR_FILENO, &mut st) != 0 {
+            return;
+        }
+        if (st.st_mode & libc::S_IFMT) != libc::S_IFREG {
+            return;
+        }
+        if st.st_size <= 0 || (st.st_size as u64) <= max_bytes {
+            return;
+        }
+        // O_APPEND ile açılmış fd olduğu için sonraki yazılar yeni dosya sonuna gider.
+        libc::ftruncate(libc::STDERR_FILENO, 0);
+        println!("[GÜNLÜK] Boyut sınırı aşıldı; günlük dosyası sıfırlandı.");
+    }
 }
 
 fn compile_macros(profile: &ProfileConfig) -> Vec<CompiledMacro> {
@@ -1270,11 +1290,16 @@ fn main() {
     let mut latched_combos: HashSet<String> = HashSet::new();
     // PRESS_AND_RELEASE makrolarında bırakış eylemlerinin bir kez çalışmasını sağlar.
     let mut press_release_armed: HashSet<String> = HashSet::new();
+    let mut last_log_check = Instant::now();
 
     loop {
         if SHUTDOWN.load(Ordering::SeqCst) {
             println!("[MacroStat Motor] Kapanış sinyali alındı. Motor kapatılıyor.");
             break;
+        }
+        if last_log_check.elapsed() > Duration::from_secs(30) {
+            last_log_check = Instant::now();
+            maybe_rotate_stderr_log(1_000_000);
         }
         if unsafe { libc::getppid() } == 1 {
             println!("[MacroStat Motor] Ana uygulama sonlandırıldı. Motor kapatılıyor.");
@@ -1773,6 +1798,51 @@ mod tests {
         let json = r#"{"id":"legacy","name":"Eski","panicKey":"KEY_PAUSE","macros":[]}"#;
         let p = parse_profile(json).expect("tekil profil ayrıştırılmalı");
         assert_eq!(p.id, "legacy");
+    }
+
+    #[test]
+    fn malformed_json_is_rejected() {
+        assert!(parse_profile("{bozuk").is_none());
+        assert!(parse_profile("").is_none());
+    }
+
+    #[test]
+    fn invalid_trigger_is_skipped() {
+        let profile = ProfileConfig {
+            id: "p".into(),
+            name: "P".into(),
+            panic_key: "KEY_PAUSE".into(),
+            virtual_device_name: "V".into(),
+            macros: vec![
+                MacroConfig {
+                    id: "bad".into(),
+                    name: "Kötü".into(),
+                    enabled: true,
+                    trigger_key: "KEY_OLMAYAN_TUS".into(),
+                    trigger_mode: TriggerMode::ONCE,
+                    repeat_count: 1,
+                    double_tap_timeout_ms: 300,
+                    hold_duration_ms: 300,
+                    release_actions: vec![],
+                    actions: vec![],
+                },
+                MacroConfig {
+                    id: "ok".into(),
+                    name: "İyi".into(),
+                    enabled: true,
+                    trigger_key: "KEY_F8".into(),
+                    trigger_mode: TriggerMode::ONCE,
+                    repeat_count: 1,
+                    double_tap_timeout_ms: 300,
+                    hold_duration_ms: 300,
+                    release_actions: vec![],
+                    actions: vec![],
+                },
+            ],
+        };
+        let compiled = compile_macros(&profile);
+        assert_eq!(compiled.len(), 1);
+        assert_eq!(compiled[0].trigger_key, "KEY_F8");
     }
 
     #[test]

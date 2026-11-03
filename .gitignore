@@ -9,3 +9,8 @@ __pycache__/
 
 # Derlenmiş motor ikilisi (cargo build --release üretir)
 /cachymacro-daemon
+
+# makepkg çalışma dizinleri (src/ ile çakışmasın)
+/.makepkg/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig

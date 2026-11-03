@@ -134,6 +134,9 @@ class MacrosMixin:
                     for j, macro in enumerate(imported_p.get("macros", [])):
                         macro["id"] = f"macro-{base}-{i}-{j}"
                         macro["enabled"] = False
+                        trigger = macro.get("triggerKey", macro.get("trigger_key"))
+                        if not common.is_valid_trigger(trigger):
+                            macro["triggerKey"] = ""
                         for k, action in enumerate(macro.get("actions", [])):
                             action["id"] = f"act-{base}-{i}-{j}-{k}"
                         for k, action in enumerate(macro.get("releaseActions", [])):
@@ -166,6 +169,9 @@ class MacrosMixin:
                 imported["name"] = (imported.get('name') or 'Makro') + T(" (İçe Aktarıldı)")
                 # Güvenlik: içe aktarılan makrolar kullanıcı onaylayana dek kapalıdır.
                 imported["enabled"] = False
+                trigger = imported.get("triggerKey", imported.get("trigger_key"))
+                if not common.is_valid_trigger(trigger):
+                    imported["triggerKey"] = ""
                 for j, action in enumerate(imported.get("actions", [])):
                     action["id"] = f"act-{base}-{i}-{j}"
                 for j, action in enumerate(imported.get("releaseActions", [])):

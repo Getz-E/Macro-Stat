@@ -15,6 +15,8 @@ assets/default_profile.json    Tek varsayılan profil şablonu (demolar kapalı)
 profile.json                   Şablonun eski yol için sembolik bağlantısı
 cachymacro-daemon              Derlenmiş motor (yerel; cargo build --release)
 install_all.sh                 Paket/udev kontrolü + derleme + kısayol
+PKGBUILD                       Yerel Arch/CachyOS paketi (`makepkg -si`)
+packaging/                     Paket başlatıcısı, .desktop ve udev kuralı
 baslat-arayuz.sh               Arayüzü başlatır
 build_appimage.sh              AppImage paketleyici
 tests/                         Python birim testleri (unittest)
@@ -28,6 +30,16 @@ Kullanıcı profili: `~/.config/cachymacro/profile.json` (ilk açılışta depo
 ```bash
 sudo ./install_all.sh     # paketler + udev kuralı + release derleme
 ./baslat-arayuz.sh
+```
+
+Gereksinimler: Python **3.10+**, PyQt6, Rust (release derlemesi için), `libevdev`.
+CI Python 3.12 ile çalışır. Varsayılan profil şablonundaki demo makrolar güvenlik
+için **kapalı** gelir; etkinleştirmeden önce tetikleyiciyi kontrol edin.
+
+Arch/CachyOS'ta paket olarak kurmak için (depo kökünde):
+
+```bash
+makepkg -si
 ```
 
 `input` grubuna ekleme yapıldıysa oturumu kapatıp açın. Alternatif olarak
@@ -47,14 +59,17 @@ kapsamlı `pkexec` ile aynı kuralı kurar.
 - Aynı kullanıcı için ikinci motor `flock` kilidiyle engellenir.
 - Aygıt ekleme/çıkarma `inotify` ile anında algılanır; 4 saniyelik yoklama
   yalnızca `inotify` kullanılamıyorsa yedek olarak devreye girer.
+- Günlük dosyası (`/tmp/cachymacro.log`) yalnızca sahibi tarafından okunabilir
+  (`0600`) ve 1 MB'ta döndürülür; uzun süre açık motorda da kendi kendine kırpılır.
 
 ## Arayüz özellikleri
 
-- **Dil:** Başlıktaki seçiciden Türkçe/English. Tercih
+- **Dil:** Üst çubuktaki **🌐** menüsünden Türkçe/English. Tercih
   `~/.config/cachymacro/settings.json` dosyasında saklanır ve arayüz yeniden
   başlatılır; motor etkilenmez.
-- **Profil yönetimi:** Yeni, yeniden adlandır (✏️), sil (🗑️). Son profil silinemez.
-  Dışa aktarmada yalnızca aktif profil veya tüm profiller tek JSON olarak yazılır.
+- **Profil yönetimi:** Üst çubuktaki **⋯** menüsünden yeni profil, yeniden
+  adlandırma, silme ve içe/dışa aktarma. Son profil silinemez. Dışa aktarmada
+  yalnızca aktif profil veya tüm profiller tek JSON olarak yazılır.
 - **Yedek:** Her kayıtta `profile.json.bak` tutulur; sistem sekmesinden son yedek
   tek tıkla geri yüklenebilir.
 - **Makroyu test et:** Düzenleyicideki test düğmesi, kaydedilmemiş eylemleri dâhil

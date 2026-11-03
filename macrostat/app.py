@@ -21,8 +21,12 @@ _GUI_LOCK = None
 def acquire_gui_single_instance():
     """İkinci bir arayüz örneğinin aynı profili/motoru yönetmesini engeller."""
     global _GUI_LOCK
-    lock_path = Path(f"/tmp/cachymacro-gui-{os.getuid()}.lock")
-    handle = open(lock_path, "w", encoding="utf-8")
+    lock_path = common.RUNTIME_DIR / f"cachymacro-gui-{os.getuid()}.lock"
+    try:
+        handle = open(lock_path, "w", encoding="utf-8")
+    except OSError:
+        # Kilit dosyası açılamazsa (salt-okunur / kısıtlı dizin) uygulamayı engelleme.
+        return True
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:

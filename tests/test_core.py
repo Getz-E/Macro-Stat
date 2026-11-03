@@ -149,6 +149,77 @@ class ProfileMigrationTests(unittest.TestCase):
         self.assertEqual(target.all_profiles, [legacy])
 
 
+class TriggerValidationTests(unittest.TestCase):
+    def test_accepts_keys_buttons_and_combos(self):
+        for value in ("KEY_A", "BTN_LEFT", "KEY_LEFTSHIFT+KEY_LEFTCTRL",
+                      "KEY_CODE_59", " key_f8 "):
+            self.assertTrue(common.is_valid_trigger(value), value)
+
+    def test_rejects_invalid_values(self):
+        for value in ("", None, "S", "KEY_", "KEY_A+", "KEY_A+rm -rf /"):
+            self.assertFalse(common.is_valid_trigger(value), value)
+
+
+class DefaultSeedTests(unittest.TestCase):
+    def test_english_seed_translates_visible_fields(self):
+        i18n.set_language("en")
+        try:
+            data = json.loads(common._seed_profile_bytes().decode("utf-8"))
+            profile = data["profiles"][0]
+            self.assertEqual(profile["name"], "MacroStat Default Profile")
+            names = [m["name"] for m in profile["macros"]]
+            self.assertIn("Rapid Click (Demo)", names)
+            self.assertTrue(all(m["enabled"] is False for m in profile["macros"]))
+        finally:
+            i18n.set_language(i18n.DEFAULT_LANGUAGE)
+
+    def test_turkish_seed_is_unchanged(self):
+        i18n.set_language("tr")
+        data = json.loads(common._seed_profile_bytes().decode("utf-8"))
+        self.assertEqual(data["profiles"][0]["name"], "MacroStat Varsayılan Profil")
+
+
+class ProfileSaveTests(unittest.TestCase):
+    def setUp(self):
+        from macrostat.core import CoreMixin
+
+        self.core_mixin = CoreMixin
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "profile.json"
+        self.patch = mock.patch.object(common, "PROFILE_PATH", self.path)
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def _target(self):
+        profile = {"id": "p1", "name": "One",
+                   "macros": [{"id": "", "actions": [{"type": "KEY_TAP", "key": "KEY_A"}]}]}
+        target = type("Target", (), {})()
+        target.profile_data = profile
+        target.all_profiles = [profile]
+        target.active_profile_id = "p1"
+        return target
+
+    def test_save_creates_wrapper_and_no_temp_files(self):
+        target = self._target()
+        self.assertTrue(self.core_mixin.save_profile_to_disk(target, restart_daemon=False))
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(data["activeProfileId"], "p1")
+        self.assertEqual(data["schemaVersion"], 1)
+        self.assertTrue(data["profiles"][0]["macros"][0]["id"].startswith("macro-"))
+        leftovers = [p.name for p in self.path.parent.iterdir()
+                     if p.name not in ("profile.json", "profile.json.bak")]
+        self.assertEqual(leftovers, [])
+
+    def test_second_save_keeps_backup(self):
+        target = self._target()
+        self.core_mixin.save_profile_to_disk(target, restart_daemon=False)
+        self.core_mixin.save_profile_to_disk(target, restart_daemon=False)
+        self.assertTrue((self.path.parent / "profile.json.bak").exists())
+
+
 class DaemonProcessTests(unittest.TestCase):
     def test_zombie_counts_as_dead(self):
         proc = subprocess.Popen(["sleep", "30"])

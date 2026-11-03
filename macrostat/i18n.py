@@ -331,6 +331,20 @@ _EN = {
     "Arayüz yeniden başlatılamadı. Lütfen uygulamayı elle açın.": (
         "The interface could not be restarted. Please open the app manually."
     ),
+    # --- Varsayılan profil şablonu (veri alanları) ---
+    "MacroStat Varsayılan Profil": "MacroStat Default Profile",
+    "CachyOS & KDE Plasma için donanım tabanlı sıfır gecikmeli makrolar. Varsayılan demolar güvenlik için devre dışıdır.": (
+        "Hardware-based zero-latency macros for CachyOS & KDE Plasma. "
+        "Default demos are disabled for safety."
+    ),
+    "Hızlı Tıklama (Demo)": "Rapid Click (Demo)",
+    "Etkinleştirildiğinde tetikleyici tuşta sol tık bas-çek yapar. Varsayılan olarak kapalıdır.": (
+        "When enabled, performs a left click on each trigger. Disabled by default."
+    ),
+    "X Tuşu (Demo)": "X Key (Demo)",
+    "Etkinleştirildiğinde X tuşuna basıp 50 ms bekler. Varsayılan olarak kapalıdır.": (
+        "When enabled, presses X and waits 50 ms. Disabled by default."
+    ),
 }
 
 #: Tanılama metni (çok satırlı, yer tutuculu)

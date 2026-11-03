@@ -42,7 +42,7 @@ jobs:
       - name: Python birim testleri
         run: python -m unittest discover -s tests -v
       - name: Betik sözdizimi
-        run: bash -n baslat-arayuz.sh build_appimage.sh install_all.sh
+        run: bash -n baslat-arayuz.sh build_appimage.sh install_all.sh packaging/macrostat
       - name: Offscreen arayüz duman testi
         env:
           QT_QPA_PLATFORM: offscreen

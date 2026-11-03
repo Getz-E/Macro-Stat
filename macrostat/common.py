@@ -5,9 +5,11 @@
 import sys
 import os
 import json
+import re
 import time
 import subprocess
 import shutil
+import tempfile
 import atexit
 import signal
 import fcntl
@@ -19,7 +21,26 @@ from macrostat.settings import load_settings, save_settings
 
 DAEMON_PROC = None
 LOG_MAX_BYTES = 1_000_000
-PID_FILE = Path(f"/tmp/cachymacro-{os.getuid()}.pid")
+
+def _runtime_dir():
+    """Kilit/pid dosyaları için oturuma özel dizin (systemd XDG_RUNTIME_DIR)."""
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if base and Path(base).is_dir():
+        return Path(base)
+    return Path(tempfile.gettempdir())
+
+RUNTIME_DIR = _runtime_dir()
+PID_FILE = RUNTIME_DIR / f"cachymacro-{os.getuid()}.pid"
+
+#: Tetikleyici tek parçası: KEY_* / BTN_* adları (motorun kabul ettiği biçim).
+_TRIGGER_PART_RE = re.compile(r"^(?:KEY_[A-Z0-9_]+|BTN_[A-Z0-9_]+)$")
+
+def is_valid_trigger(value):
+    """'KEY_A+KEY_LEFTCTRL' veya 'BTN_LEFT' gibi tetikleyicileri doğrular."""
+    if not isinstance(value, str):
+        return False
+    parts = [p.strip() for p in value.split("+")]
+    return bool(parts) and all(p and _TRIGGER_PART_RE.match(p.upper()) for p in parts)
 
 def _pid_file_pid():
     """Pidfile'daki sürecin gerçekten MacroStat motoru olduğunu doğrular."""
@@ -95,7 +116,13 @@ def open_rotated_log():
             LOG_FILE.rename(backup)
     except Exception:
         pass
-    return open(LOG_FILE, "a", encoding="utf-8")
+    handle = open(LOG_FILE, "a", encoding="utf-8")
+    try:
+        # Günlük, makro/profil adları içerebilir; yalnızca sahibi okuyabilsin.
+        os.chmod(LOG_FILE, 0o600)
+    except OSError:
+        pass
+    return handle
 
 atexit.register(cleanup_daemon)
 signal.signal(signal.SIGINT, lambda sig, frame: (cleanup_daemon(), sys.exit(0)))
@@ -135,6 +162,26 @@ def _default_profile_path():
 
 DEFAULT_PROFILE_PATH = _default_profile_path()
 
+def _seed_profile_bytes():
+    """Şablonu aktif dile göre üretir (yalnızca görünen ad/açıklama çevrilir)."""
+    raw = DEFAULT_PROFILE_PATH.read_text(encoding="utf-8")
+    if get_language() != "en":
+        return raw.encode("utf-8")
+    try:
+        data = json.loads(raw)
+        for profile in data.get("profiles", []):
+            for field in ("name", "description"):
+                if isinstance(profile.get(field), str):
+                    profile[field] = T(profile[field])
+            for macro in profile.get("macros", []):
+                for field in ("name", "description"):
+                    if isinstance(macro.get(field), str):
+                        macro[field] = T(macro[field])
+        return json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
+    except Exception:
+        return raw.encode("utf-8")
+
+
 def locate_paths():
     """Tek kanonik ikili ve kullanıcı profil yolu. İlk açılışta depo profili tohumlanır."""
     candidates_bin = [
@@ -160,14 +207,17 @@ def locate_paths():
 
     profile_path = Path.home() / ".config" / "cachymacro" / "profile.json"
     if not profile_path.exists():
-        seed = DEFAULT_PROFILE_PATH
         try:
             profile_path.parent.mkdir(parents=True, exist_ok=True)
-            if seed.exists():
-                shutil.copy2(seed, profile_path)
+            if DEFAULT_PROFILE_PATH.exists():
+                profile_path.write_bytes(_seed_profile_bytes())
+                os.chmod(profile_path, 0o600)
         except OSError as e:
             print(f"[UYARI] Profil tohumlanamadı: {e}")
 
     return daemon_bin, profile_path
+
+# Tohumlama dile duyarlı olsun: arayüz main() çalışmadan önce de ayarı uygula.
+set_language(load_settings().get("language", get_language()))
 
 DAEMON_BIN, PROFILE_PATH = locate_paths()
