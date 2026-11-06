@@ -15,6 +15,17 @@ from .widgets import SlidingSwitch, KeyCaptureDialog  # noqa: F401
 #: Motorun TEXT eylemi için kabul ettiği üst sınırla aynı (transfer modülü).
 MAX_TEXT_BYTES = transfer.MAX_TEXT_BYTES
 
+
+def _plain_message_box(parent, icon, title, text):
+    """Dış kaynaklı metni Qt zengin metni olarak yorumlamadan gösterir."""
+    box = QMessageBox(parent)
+    box.setIcon(icon)
+    box.setWindowTitle(title)
+    box.setTextFormat(Qt.TextFormat.PlainText)
+    box.setText(text)
+    return box
+
+
 class EditorMixin:
     """Makro düzenleyici, eylem tablosu ve test çalıştırma."""
 
@@ -669,11 +680,15 @@ class EditorMixin:
                 if proc.state() != QProcess.ProcessState.NotRunning:
                     proc.kill()
                 detail = stderr[-800:] if stderr else proc.errorString()
-                QMessageBox.warning(self, T("Makro testi başarısız."), detail)
+                _plain_message_box(
+                    self, QMessageBox.Icon.Warning,
+                    T("Makro testi başarısız."), detail).exec()
             else:
                 self.show_autosave_banner(T("Makro başarıyla test edildi."))
         except Exception as e:
-            QMessageBox.warning(self, T("Makro testi başarısız."), str(e))
+            _plain_message_box(
+                self, QMessageBox.Icon.Warning,
+                T("Makro testi başarısız."), str(e)).exec()
         finally:
             try:
                 temp_path.unlink()

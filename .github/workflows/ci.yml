@@ -23,7 +23,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Birim testleri
-        run: cargo test --release
+        run: cargo test --release --locked
 
   msrv:
     name: Rust 1.79 (MSRV) derleme + test

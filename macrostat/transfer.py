@@ -26,6 +26,9 @@ MAX_TEXT_BYTES = 64 * 1024
 _PART_RE = re.compile(r"^(?:KEY_[A-Z0-9_]+|BTN_[A-Z0-9_]+)$")
 _KEY_PART_RE = re.compile(r"^KEY_[A-Z0-9_]+$")
 _BTN_PART_RE = re.compile(r"^BTN_[A-Z0-9_]+$")
+#: İçe aktarılan makro/profil kimlikleri: yalnızca harf, rakam, '_' ve '-'.
+#: Kimlikler motora komut satırında geçebilir; kontrol/bidi karakter kabul edilmez.
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _PROFILE_FIELDS = (
     "id", "name", "description", "panicKey", "restartKey", "virtualDeviceName",
@@ -161,7 +164,8 @@ def _sanitize_macro(raw, warnings, used_ids, id_prefix):
     macro = {key: copy.deepcopy(raw[key]) for key in _MACRO_FIELDS if key in raw}
 
     macro_id = macro.get("id")
-    if not isinstance(macro_id, str) or not macro_id or macro_id in used_ids:
+    if (not isinstance(macro_id, str) or not _ID_RE.match(macro_id)
+            or macro_id in used_ids):
         macro_id = "macro-{}".format(time.time_ns() // 1_000_000)
         suffix = 1
         while macro_id in used_ids:
@@ -219,7 +223,8 @@ def _sanitize_profile(raw, warnings, used_profile_ids, used_macro_ids, id_prefix
     profile = {key: copy.deepcopy(raw[key]) for key in _PROFILE_FIELDS if key in raw}
 
     profile_id = profile.get("id")
-    if not isinstance(profile_id, str) or not profile_id or profile_id in used_profile_ids:
+    if (not isinstance(profile_id, str) or not _ID_RE.match(profile_id)
+            or profile_id in used_profile_ids):
         profile_id = "profile-{}".format(time.time_ns() // 1_000_000)
         suffix = 1
         while profile_id in used_profile_ids:

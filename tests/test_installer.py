@@ -270,6 +270,10 @@ class ReleasePipelineTests(unittest.TestCase):
         for image in ("ubuntu:24.04", "debian:trixie", "fedora:41", "archlinux"):
             self.assertIn(image, ci)
 
+    def test_ci_test_jobs_build_with_lockfile(self):
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertGreaterEqual(ci.count("cargo test --release --locked"), 2)
+
     def test_installer_requires_secure_msrv_with_ubuntu_fallback(self):
         text = (ROOT / "packaging/install-common.sh").read_text(encoding="utf-8")
         self.assertIn('RUST_MIN_VERSION="1.79"', text)

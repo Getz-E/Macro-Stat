@@ -12,6 +12,11 @@ import re
 #: C0/C1 denetim karakterleri (satır sonu ve satır başı hariç).
 _CONTROL_RE = re.compile(r"[\x00-\x08\t\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
+#: Görünmez bidi/yönlendirme ve zero-width karakterleri: görünen adlarda
+#: görsel aldatmacaya (sahte uzantı, ters yazım) yol açabilirler.
+_INVISIBLE_RE = re.compile(
+    r"[\u061c\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff]")
+
 
 def sanitize_display_text(value, single_line=False, multiline=False, max_len=512):
     """Görünen metinden denetim karakterlerini ve HTML açılarını temizler.
@@ -23,6 +28,7 @@ def sanitize_display_text(value, single_line=False, multiline=False, max_len=512
         return ""
     text = value.replace("\r\n", "\n").replace("\r", "\n")
     text = _CONTROL_RE.sub("", text)
+    text = _INVISIBLE_RE.sub("", text)
     text = text.replace("<", "").replace(">", "")
     if multiline and not single_line:
         text = "\n".join(line.strip() for line in text.split("\n"))

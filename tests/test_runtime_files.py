@@ -69,6 +69,25 @@ class PackagingManifestTests(unittest.TestCase):
         self.assertIn("cp -r protocols", text)
 
 
+class PidFileTests(unittest.TestCase):
+    def test_pid_file_is_private_and_contains_daemon_pid(self):
+        from macrostat import system
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp) / "macrostat.pid"
+            with mock.patch.object(system, "PID_FILE", pid_path):
+                system.write_pid_file(4242)
+            self.assertEqual(pid_path.read_text(encoding="utf-8").strip(), "4242")
+            self.assertEqual(os.stat(pid_path).st_mode & 0o777, 0o600)
+
+
+class GuiBuildFallbackTests(unittest.TestCase):
+    def test_gui_build_fallback_uses_lockfile(self):
+        text = (Path(__file__).resolve().parent.parent / "macrostat"
+                / "system.py").read_text(encoding="utf-8")
+        self.assertIn('["cargo", "build", "--release", "--locked"]', text)
+
+
 class ConfigMigrationTests(unittest.TestCase):
     """0.x geliştirme sürümlerinin eski yapılandırma adından taşıma."""
 

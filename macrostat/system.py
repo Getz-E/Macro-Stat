@@ -14,6 +14,12 @@ from .common import *  # noqa: F401,F403
 from .common import _pid_file_pid, _terminate_daemon_pid
 from .widgets import SlidingSwitch, KeyCaptureDialog  # noqa: F401
 
+
+def write_pid_file(pid):
+    """Pid dosyasını 0600 izinle ve sembolik bağlantı izlemeden yazar."""
+    common.write_private_bytes(PID_FILE, "{}\n".format(pid).encode("ascii"))
+
+
 class SystemMixin:
     """Sistem sekmesi, motor süreç denetimi, izinler ve yedekleme."""
 
@@ -305,7 +311,8 @@ class SystemMixin:
                     theme.set_state(self.status_badge, "info")
                     QApplication.processEvents()
                     try:
-                        subprocess.run(["cargo", "build", "--release"], cwd=cargo_dir, check=False)
+                        subprocess.run(["cargo", "build", "--release", "--locked"],
+                                       cwd=cargo_dir, check=False)
                         built = cargo_dir / "target" / "release" / "macrostat-daemon"
                         if built.exists():
                             shutil.copy2(built, SCRIPT_DIR / "macrostat-daemon")
@@ -335,7 +342,7 @@ class SystemMixin:
             log_f.close()
             common.DAEMON_PROC = self.daemon_proc
             try:
-                PID_FILE.write_text(str(self.daemon_proc.pid), encoding="utf-8")
+                write_pid_file(self.daemon_proc.pid)
             except OSError:
                 pass
 

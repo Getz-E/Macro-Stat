@@ -3,7 +3,9 @@
 """Tuş yakalama iletişim kutusunun birim testleri (offscreen Qt)."""
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -15,7 +17,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QSpinBox, QTableWidget, QWidget,
 )
 
-from macrostat import common, core, onboarding
+from macrostat import common, core, editor, onboarding
 from macrostat.core import CoreMixin
 from macrostat.editor import EditorMixin
 from macrostat.recorder import RecorderMixin
@@ -248,6 +250,41 @@ class ExclusiveMenuTest(unittest.TestCase):
         actions[0].trigger()
 
         self.assertTrue(actions[0].isChecked())
+
+
+class PlainMessageBoxTest(unittest.TestCase):
+    def test_message_box_forces_plain_text_format(self):
+        box = editor._plain_message_box(
+            None, QMessageBox.Icon.Warning, "Başlık", "<b>motor çıktısı</b>")
+        try:
+            self.assertEqual(box.textFormat(), Qt.TextFormat.PlainText)
+            self.assertEqual(box.text(), "<b>motor çıktısı</b>")
+        finally:
+            box.deleteLater()
+
+    def test_failed_macro_test_shows_stderr_as_plain_text(self):
+        stub = type("Stub", (), {})()
+        stub._editor_macro_copy = lambda: {
+            "id": "m1", "name": "M",
+            "actions": [{"type": "KEY_TAP", "key": "KEY_A"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(common, "DAEMON_BIN", Path("/bin/sh")), \
+                mock.patch.object(common, "RUNTIME_DIR", Path(tmp)), \
+                mock.patch.object(editor, "QProcess") as proc_cls, \
+                mock.patch.object(editor, "_plain_message_box") as box:
+            fake = proc_cls.return_value
+            fake.waitForStarted.return_value = True
+            fake.waitForFinished.return_value = True
+            fake.readAllStandardError.return_value = "<b>motor hatası</b>".encode("utf-8")
+            fake.exitStatus.return_value = object()
+            fake.exitCode.return_value = 1
+            fake.state.return_value = object()
+            editor.EditorMixin.test_current_macro(stub)
+
+        box.assert_called_once()
+        self.assertEqual(box.call_args.args[3], "<b>motor hatası</b>")
+        box.return_value.exec.assert_called_once()
 
 
 class OnboardingSkipTest(unittest.TestCase):

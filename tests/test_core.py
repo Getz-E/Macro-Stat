@@ -512,6 +512,39 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(macro["actions"][0]["key"], "KEY_B")
         self.assertTrue(macro["actions"][0]["id"])
 
+    def test_import_regenerates_unsafe_ids(self):
+        unsafe_id = "m" + chr(0x202E) + "1"
+        payload = {
+            "profiles": [{
+                "id": "p<script>1",
+                "name": "Yeni",
+                "panicKey": "KEY_PAUSE",
+                "macros": [
+                    {
+                        "id": unsafe_id,
+                        "name": "Makro",
+                        "triggerKey": "KEY_A",
+                        "actions": [],
+                    },
+                    {
+                        "id": "safe-id_01",
+                        "name": "Güvenli",
+                        "triggerKey": "KEY_B",
+                        "actions": [],
+                    },
+                ],
+            }]
+        }
+        result = transfer.import_payload(payload)
+        profile = result["profiles"][0]
+        unsafe_macro, safe_macro = profile["macros"]
+        self.assertNotEqual(profile["id"], "p<script>1")
+        self.assertNotEqual(unsafe_macro["id"], unsafe_id)
+        for value in (profile["id"], unsafe_macro["id"], safe_macro["id"]):
+            self.assertRegex(value, r"^[A-Za-z0-9_-]{1,64}$")
+        self.assertEqual(safe_macro["id"], "safe-id_01",
+                         "güvenli kimlikler korunmalı")
+
     def test_import_drops_invalid_actions_with_warning(self):
         result = transfer.import_payload([{
             "name": "M",
@@ -702,6 +735,16 @@ class SecurityHardeningTests(unittest.TestCase):
         self.assertEqual(
             common.sanitize_display_text("x" * 500, single_line=True, max_len=20),
             "x" * 20)
+
+    def test_sanitize_display_text_strips_bidi_and_zero_width(self):
+        bidi = chr(0x202E)
+        zero_width = chr(0x200B)
+        bom = chr(0xFEFF)
+        cleaned = common.sanitize_display_text(
+            "ma" + bidi + "exe" + zero_width + ".txt" + bom, single_line=True)
+        for forbidden in (bidi, zero_width, bom):
+            self.assertNotIn(forbidden, cleaned)
+        self.assertEqual(cleaned, "maexe.txt")
 
     def test_coerce_int_falls_back_and_clamps(self):
         self.assertEqual(common.coerce_int("12", 1, 1, 99), 12)

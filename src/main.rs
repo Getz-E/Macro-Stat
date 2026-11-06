@@ -1700,12 +1700,39 @@ fn trigger_matches(m: &CompiledMacro, key: Key, is_press: bool, held: &HashSet<K
 /// belleği tüketmesini engeller; gerçek profiller birkaç yüz kilobayttır.
 const MAX_PROFILE_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Profil dosyasını son bileşendeki sembolik bağlantıları izlemeden açar.
+///
+/// Profil kullanıcı denetimindedir; `O_NOFOLLOW` başka bir dosyaya yönlenen
+/// bağlantı üzerinden okuma yapılmasını engeller.
+fn open_private_profile(path: &Path) -> std::io::Result<fs::File> {
+    use std::ffi::CString;
+    use std::io::{Error, ErrorKind};
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::FromRawFd;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| Error::new(ErrorKind::InvalidInput, "profil yolu geçersiz"))?;
+    // SAFETY: `c_path` NUL ile sonlandırılmış ve çağrı boyunca yaşıyor;
+    // dönen geçerli fd başarıda `File` tarafından sahiplenilir.
+    let fd = unsafe {
+        libc::open(
+            c_path.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
+    if fd < 0 {
+        return Err(Error::last_os_error());
+    }
+    // SAFETY: fd yukarıda başarıyla açıldı ve başka hiçbir sahip yok.
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
 /// `path` dosyasını en fazla `limit` bayt okuyup UTF-8 metne çevirir.
 ///
 /// Sınır aşılırsa `InvalidData` döner; dosyanın tamamı belleğe alınmaz.
 fn read_profile_text(path: &Path, limit: u64) -> std::io::Result<String> {
     use std::io::{Error, ErrorKind, Read};
-    let file = fs::File::open(path)?;
+    let file = open_private_profile(path)?;
     if file.metadata()?.len() > limit {
         return Err(Error::new(
             ErrorKind::InvalidData,
@@ -2615,6 +2642,25 @@ mod tests {
             false,
             &held
         ));
+    }
+
+    #[test]
+    fn profile_reader_rejects_symlinks() {
+        let dir = std::env::temp_dir().join(format!(
+            "macrostat-profile-link-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).expect("geçici dizin");
+        let target = dir.join("real.json");
+        fs::write(&target, "{}").expect("hedef profil");
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&target, &link).expect("sembolik bağ");
+        let err = read_profile_text(&link, 1024).expect_err("sembolik bağ reddedilmeli");
+        assert_eq!(err.raw_os_error(), Some(libc::ELOOP));
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_file(&target);
+        let _ = fs::remove_dir(&dir);
     }
 
     #[test]
