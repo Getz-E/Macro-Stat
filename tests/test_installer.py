@@ -265,9 +265,17 @@ class ReleasePipelineTests(unittest.TestCase):
 
     def test_ci_checks_msrv_and_every_distro(self):
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("1.75", ci)
+        self.assertIn("1.79", ci)
+        self.assertNotIn("1.75", ci)
         for image in ("ubuntu:24.04", "debian:trixie", "fedora:41", "archlinux"):
             self.assertIn(image, ci)
+
+    def test_installer_requires_secure_msrv_with_ubuntu_fallback(self):
+        text = (ROOT / "packaging/install-common.sh").read_text(encoding="utf-8")
+        self.assertIn('RUST_MIN_VERSION="1.79"', text)
+        # Ubuntu 24.04 depo rustc'si 1.75; sürümlü paketlerle yükseltilmeli.
+        self.assertIn("rustc-1.79", text)
+        self.assertIn("cargo-1.79", text)
 
     def test_lockfile_is_readable_by_msrv_cargo(self):
         first_lines = (ROOT / "Cargo.lock").read_text(encoding="utf-8").splitlines()[:4]

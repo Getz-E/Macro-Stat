@@ -26,12 +26,12 @@ jobs:
         run: cargo test --release
 
   msrv:
-    name: Rust 1.75 (MSRV) derleme + test
+    name: Rust 1.79 (MSRV) derleme + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Rust 1.75 araç zinciri
-        uses: dtolnay/rust-toolchain@1.75
+      - name: Rust 1.79 araç zinciri
+        uses: dtolnay/rust-toolchain@1.79
       - name: Kilitleyiciyle derle ve test et
         run: cargo test --release --locked
 

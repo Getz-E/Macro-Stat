@@ -2,8 +2,9 @@
 name = "macrostat-daemon"
 version = "1.0.0"
 edition = "2021"
-# Ubuntu 24.04 / Debian 13 depolarındaki rustc sürümleriyle uyumlu taban.
-rust-version = "1.75"
+# Ubuntu 24.04'ün depo rustc'si 1.75; kurulum betiği `rustc-1.79` sürümlü
+# pakete düşer. Debian 13 / Fedora 41 / Arch depolarındaki rustc yeterli.
+rust-version = "1.79"
 authors = ["MacroStat Author"]
 description = "Low-latency offline macro engine for Linux (evdev/uinput, X11 and KDE Wayland)"
 license = "GPL-3.0-or-later"
@@ -17,9 +18,8 @@ rand = "0.8"
 libc = "0.2"
 # KDE Wayland'da imleci mutlak konuma taşımak için (org_kde_kwin_fake_input).
 # `dlopen` özelliği libwayland'a derleme zamanı bağımlılığını kaldırır.
-# Not: wayland-scanner 0.31.11+ quick-xml ^0.41 ister (MSRV 1.79). Ubuntu
-# 24.04'ün rustc 1.75'i için Cargo.lock'ta 0.31.10'a sabitlendi; `cargo update`
-# sonrası MSRV işi kırılırsa bu sürümü koruyun.
+# Not: wayland-scanner 0.31.11+ güvenli quick-xml 0.41'i getirir (RUSTSEC-2026-0194/0195).
+# quick-xml 0.41 MSRV'si 1.79'dur; bu yüzden projenin tabanı 1.79'dur.
 wayland-client = { version = "0.31", features = ["dlopen"] }
 wayland-scanner = "0.31"
 

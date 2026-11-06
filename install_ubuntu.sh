@@ -1,7 +1,8 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 MacroStat contributors
-# Ubuntu 24.04+ installation entry point (python3-pyqt6 6.6+, rustc 1.75+).
+# Ubuntu 24.04+ installation entry point (python3-pyqt6 6.6+; the shared library
+# upgrades the 1.75 repository rustc to the versioned rustc-1.79/cargo-1.79).
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"

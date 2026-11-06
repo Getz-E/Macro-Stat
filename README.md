@@ -2,7 +2,7 @@
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)](https://www.python.org/)
-[![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust 1.79+](https://img.shields.io/badge/rust-1.79%2B-orange.svg)](https://www.rust-lang.org/)
 ![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)
 
 A low-latency, fully offline macro engine for Linux. The Rust core reads and
@@ -76,10 +76,12 @@ command runs until the wizard is confirmed; on later launches the engine starts
 automatically. Reopen the wizard any time via
 **System & Guide → Run setup again**.
 
-Requirements: Python **3.10+**, PyQt6 **6.5+**, Rust **1.75+** (for the release
-build). No `libevdev` or `pkg-config` is required; the `evdev` crate is pure
-Rust. CI runs on Python 3.12. The demo macros in the default profile ship
-**disabled** for safety; check the trigger before enabling them.
+Requirements: Python **3.10+**, PyQt6 **6.5+**, Rust **1.79+** (for the release
+build). On Ubuntu 24.04 the installer pulls the versioned `rustc-1.79` /
+`cargo-1.79` packages from the distribution repositories. No `libevdev` or
+`pkg-config` is required; the `evdev` crate is pure Rust. CI runs on Python
+3.12. The demo macros in the default profile ship **disabled** for safety;
+check the trigger before enabling them.
 
 To install as a package on Arch/CachyOS (repository root):
 
@@ -186,7 +188,7 @@ cargo clippy --all-targets -- -D warnings
 QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests   # interface tests
 ```
 
-CI (`.github/workflows/ci.yml`) runs Rust fmt/clippy/test, the Rust 1.75 MSRV
+CI (`.github/workflows/ci.yml`) runs Rust fmt/clippy/test, the Rust 1.79 MSRV
 build and installation verification on four distribution images (Ubuntu 24.04,
 Debian trixie, Fedora 41, Arch). The version is fixed at `1.0.0`.
 
@@ -291,10 +293,12 @@ dar kapsamlı udev izni ve motoru başlatma. Sihirbaz onaylanmadan hiçbir yetki
 komutu çalışmaz; sonraki açılışlarda motor otomatik başlar. Sihirbazı daha sonra
 **Sistem & Kılavuz → Kurulumu yeniden çalıştır** ile tekrar açabilirsiniz.
 
-Gereksinimler: Python **3.10+**, PyQt6 **6.5+**, Rust **1.75+** (release derlemesi
-için). Sistemde ayrıca `libevdev` veya `pkg-config` gerekmez; `evdev` crate'i saf
-Rust'tır. CI Python 3.12 ile çalışır. Varsayılan profil şablonundaki demo makrolar güvenlik
-için **kapalı** gelir; etkinleştirmeden önce tetikleyiciyi kontrol edin.
+Gereksinimler: Python **3.10+**, PyQt6 **6.5+**, Rust **1.79+** (release derlemesi
+için). Ubuntu 24.04'te kurulum betiği dağıtımın sürümlü `rustc-1.79` /
+`cargo-1.79` paketlerini kurar. Sistemde ayrıca `libevdev` veya `pkg-config`
+gerekmez; `evdev` crate'i saf Rust'tır. CI Python 3.12 ile çalışır. Varsayılan
+profil şablonundaki demo makrolar güvenlik için **kapalı** gelir;
+etkinleştirmeden önce tetikleyiciyi kontrol edin.
 
 Arch/CachyOS'ta paket olarak kurmak için (depo kökünde):
 
@@ -399,7 +403,7 @@ cargo clippy --all-targets -- -D warnings
 QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests   # arayüz testleri
 ```
 
-CI (`.github/workflows/ci.yml`) Rust biçim/clippy/test, Rust 1.75 MSRV
+CI (`.github/workflows/ci.yml`) Rust biçim/clippy/test, Rust 1.79 MSRV
 derlemesi ve dört dağıtım imajında (Ubuntu 24.04, Debian trixie, Fedora 41,
 Arch) kurulum doğrulamasını çalıştırır. Sürüm `1.0.0` olarak sabittir.
 

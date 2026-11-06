@@ -11,6 +11,9 @@
 
 INSTALL_COMMON_PATH="${BASH_SOURCE[0]}"
 
+# quick-xml 0.41 (RUSTSEC-2026-0194/0195 düzeltmesi) Rust 1.79 ister.
+RUST_MIN_VERSION="1.79"
+
 # ---------------------------------------------------------------------------
 # os-release parsing / distribution detection
 # ---------------------------------------------------------------------------
@@ -293,13 +296,44 @@ install_packages() {
     esac
 }
 
+# Ubuntu 24.04'ün depo rustc'si 1.75'tir; universe deposundaki sürümlü
+# `rustc-1.79` / `cargo-1.79` paketleri güvenli quick-xml için gereken tabanı
+# sağlar. Binler /usr/lib/rust-1.79/bin altında gelir.
+install_versioned_rust() {
+    local version="$RUST_MIN_VERSION"
+    if [ "${MACROSTAT_SKIP_PACKAGES:-0}" -eq 1 ]; then
+        return 1
+    fi
+    if [ "$DISTRO_FAMILY" != debian ] || ! command -v apt-cache >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! apt-cache show "rustc-$version" >/dev/null 2>&1 ||
+       ! apt-cache show "cargo-$version" >/dev/null 2>&1; then
+        return 1
+    fi
+    printf '   Installing rustc/cargo %s from the distribution...\n' "$version"
+    run_privileged env DEBIAN_FRONTEND=noninteractive \
+        apt-get install -y --no-install-recommends \
+        "rustc-$version" "cargo-$version" || return 1
+    if [ -d "/usr/lib/rust-$version/bin" ]; then
+        PATH="/usr/lib/rust-$version/bin:$PATH"
+        export PATH
+    fi
+    return 0
+}
+
 require_rust() {
-    local min="1.75" version
-    if ! command -v cargo >/dev/null 2>&1; then
+    local min="$RUST_MIN_VERSION" version=""
+    if command -v cargo >/dev/null 2>&1; then
+        version="$(cargo --version 2>/dev/null | awk '{print $2}')"
+    fi
+    if ! version_ge "${version:-0}" "$min" && install_versioned_rust; then
+        version="$(cargo --version 2>/dev/null | awk '{print $2}')"
+    fi
+    if [ -z "$version" ]; then
         printf '❌ cargo not found. Check the installation packages.\n' >&2
         exit 1
     fi
-    version="$(cargo --version 2>/dev/null | awk '{print $2}')"
     if ! version_ge "${version:-0}" "$min"; then
         printf '❌ Rust %s or newer is required; found: %s\n' "$min" "$version" >&2
         exit 1
@@ -349,6 +383,8 @@ main() {
         fi
     done
 
+    MACROSTAT_SKIP_PACKAGES="$skip_packages"
+    export MACROSTAT_SKIP_PACKAGES
     if [ "$skip_packages" -eq 0 ]; then
         printf '📦 Installing system packages...\n'
         install_packages
