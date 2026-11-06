@@ -5,16 +5,227 @@
 [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org/)
 ![Platform: Linux x86_64](https://img.shields.io/badge/platform-Linux%20x86__64-lightgrey.svg)
 
+A low-latency, fully offline macro engine for Linux. The Rust core reads and
+injects input through Linux `evdev` + `uinput`; the interface is built with
+PyQt6. No network access, no telemetry, no third-party services.
+
+Ubuntu, Debian, Fedora and Arch/CachyOS are supported.
+
+| Distribution | Minimum version | Installer |
+|---|---|---|
+| Ubuntu | 24.04 | `install_ubuntu.sh` |
+| Debian | 13 (trixie) | `install_debian.sh` |
+| Fedora | 41 | `install_fedora.sh` |
+| Arch / CachyOS | rolling | `install_arch.sh` |
+
+`install_all.sh` detects the distribution and runs the right script. Older
+releases are unsupported (the PyQt6 and/or Rust packages are missing or too old).
+
+## Repository layout
+
+```
+Cargo.toml / Cargo.lock        Rust dependencies
+src/main.rs                    Single engine source
+gui.py                         Thin entry point
+macrostat/                     PyQt6 interface: app, common, settings, theme, widgets,
+                               nav, core, macros, editor, recorder, system,
+                               onboarding, logpanel, transfer, kwin, sanitize, i18n
+assets/macrostat.svg           Application icon
+assets/default_profile.json    Single default profile template (demos disabled)
+profile.json                   Symlink kept for the legacy path
+macrostat-daemon               Compiled engine (local; cargo build --release)
+install_all.sh                 Detects the distribution and calls the right installer
+install_{ubuntu,debian,fedora,arch}.sh  Distribution-specific installers
+uninstall.sh                   Removes only the files installed by MacroStat
+PKGBUILD                       Local Arch/CachyOS package (`makepkg -si`)
+packaging/install-common.sh    Shared installer library (packages, udev, shortcut)
+packaging/                     Package launcher, .desktop file and udev rule
+start-macrostat.sh             Starts the interface
+tests/                         Python unit tests (unittest)
+requirements.txt               Python dependency (PyQt6)
+SECURITY.md / THIRD_PARTY.md   Security model and third-party licenses
+.github/workflows/             CI and release archive workflows
+```
+
+User profile: `~/.config/macrostat/profile.json` (seeded from the repository
+template on first launch). Legacy single-file profiles are migrated on startup.
+
+## Quick start
+
+```bash
+git clone https://github.com/ensargtz/Macro-Stat.git
+cd Macro-Stat
+./install_all.sh          # detects the distro: packages + udev + build + shortcut
+./start-macrostat.sh
+```
+
+You can also run the distribution-specific script directly
+(e.g. `./install_ubuntu.sh`). The installer adds a **MacroStat** shortcut to the
+application menu and to the desktop; double-click the desktop icon to open the
+interface. Pass `--no-desktop-shortcut` to skip the desktop shortcut and
+`--skip-packages` to skip package installation. An existing `MacroStat.desktop`
+that does not belong to MacroStat is never overwritten.
+
+> **GNOME note:** GNOME does not show desktop icons by default; the shortcut is
+> still created and remains reachable from the application menu. On KDE/XFCE/
+> Cinnamon double-clicking works directly.
+
+On first launch the **setup wizard** opens automatically: system status (✓/✗),
+the narrowly scoped udev permission, and starting the engine. No privileged
+command runs until the wizard is confirmed; on later launches the engine starts
+automatically. Reopen the wizard any time via
+**System & Guide → Run setup again**.
+
+Requirements: Python **3.10+**, PyQt6 **6.5+**, Rust **1.75+** (for the release
+build). No `libevdev` or `pkg-config` is required; the `evdev` crate is pure
+Rust. CI runs on Python 3.12. The demo macros in the default profile ship
+**disabled** for safety; check the trigger before enabling them.
+
+To install as a package on Arch/CachyOS (repository root):
+
+```bash
+makepkg -si
+```
+
+The rule only uses `TAG+="uaccess"` + `MODE="0660"`; broad `input` group
+membership or `chmod 666` is not needed. Alternatively the
+**Fix Hardware Permissions Automatically (udev)** button in the interface
+installs the same rule through a narrowly scoped `pkexec`.
+
+## Engine behaviour
+
+- Triggers are compiled at startup; they are not re-parsed on every key event.
+- Left/right Ctrl, Shift, Alt and Meta are treated as equivalent.
+- Combinations do not retrigger until one of the keys is released and pressed again.
+- Concurrently running macros are serialised by a single execution lock; key
+  state never gets mixed.
+- The `TEXT` action writes **US-ASCII** characters only; unsupported characters
+  (ç, ğ, ı, ö, ş, ü …) are skipped and a warning is logged once. Keyboard-layout
+  mapping belongs to the compositor, so this limitation is deliberate.
+- Held virtual keys are released on `SIGTERM`/`SIGINT` and on window close.
+- A second engine for the same user is blocked by a `flock` lock.
+- Device add/remove is detected instantly via `inotify`; the 4-second polling
+  loop is only a fallback when `inotify` is unavailable.
+- The log lives in a private runtime directory (`$XDG_RUNTIME_DIR/macrostat.log`,
+  otherwise `~/.cache/macrostat/`), is readable only by its owner (`0600`) and
+  rotates at 1 MB; it also trims itself in long-running engines.
+
+## Interface features
+
+- **Navigation:** **Macros**, **Macro Editor**, **Live Key Recorder** and
+  **System & Guide** pages in the left sidebar. The top bar holds profile
+  selection, engine status and the **STOP** button; the **⋯** menu contains
+  language, theme, log and restart.
+- **First-run wizard:** three steps — System Status (refreshable ✓/✗ checks),
+  Fix Permissions (setup stays off without the checkbox; only the `uaccess`
+  rule) and Ready (summary + option to start the engine). The result is stored
+  as `onboarding_completed` in `settings.json`.
+- **Live log panel:** opened as a bottom panel via **⋯ → View Log**. Text
+  filter, auto-scroll, pause/resume, clear and close; visibility is persisted as
+  `log_panel_visible` in `settings.json`. The panel recovers if the log is reset
+  or rotated; it keeps at most 5000 lines.
+- **Press/release dual action:** the **Release Actions** group in the editor
+  edits the second action sequence that runs when the key is released (applies
+  in `PRESS_AND_RELEASE` mode).
+- **Theme:** **⋯ → Theme** offers **System / Dark / Light**; dark is the
+  default, applied immediately and stored in `settings.json`. Exactly one theme
+  is checked at any time.
+- **Language:** **⋯ → Dil / Language** switches Turkish/English. The choice is
+  stored in `~/.config/macrostat/settings.json` and the interface restarts; the
+  engine is unaffected.
+- **Profile management:** new profile, rename, delete and import/export from the
+  top-bar **⋯** menu. The last profile cannot be deleted. Export writes either
+  the active profile only or all profiles as a single JSON file.
+- **Backup:** every save keeps `profile.json.bak`; the last backup can be
+  restored in one click from the System tab.
+- **Test macro:** the editor's test button runs the engine temporarily in
+  `--test-macro` mode, including unsaved actions, without touching your real
+  profile. The test engine uses a separate `MacroStat Test Engine` virtual device.
+- **Live recorder:** records keyboard and mouse (buttons + wheel) events.
+- **System-wide mouse path:** with the checkbox in the recorder, pointer
+  movement is captured across the whole desktop through `evdev`, stored as a
+  `MOUSE_PATH` action and replayed with relative deltas and timing. Recording is
+  coalesced every 4 ms, the Pause key or the UI button stops it, and the limit is
+  10 minutes / 200,000 points. On **X11** and **KDE Plasma Wayland** the cursor
+  position at recording start is saved and the pointer is moved there before
+  playback, so the path starts at the same screen position. On KDE Wayland the
+  position is read through the KWin scripting interface and alignment is done
+  via KWin's `org_kde_kwin_fake_input`; if neither is available (e.g. GNOME
+  Wayland) the start position is not saved and playback starts from the current
+  pointer position.
+
+## Emergency stop
+
+The default STOP key is **Pause** (`KEY_PAUSE`). It can be changed per profile
+with `panicKey` and is persisted with the profile. After a STOP the engine stays
+off until the **Restart** button in the interface is pressed or the assigned
+restart key is hit. The restart key defaults to **F12** (`KEY_F12`), is changed
+via **⋯ → Set Restart Key** and stored as `restartKey` in the profile; while the
+engine is stopped, only a lightweight watcher process that reads that key runs.
+
+## Troubleshooting
+
+- **🔴 Engine stopped / permission error:** run `./install_all.sh` (or your
+  distro's `install_*.sh`), use the udev fix button in the interface, or click
+  **Run setup again**; then log out and back in.
+- **Engine not found:** run `cargo build --release`; the interface copies the
+  `target/release` output to the repository root.
+- **Log:** `$XDG_RUNTIME_DIR/macrostat.log` (or `~/.cache/macrostat/`; rotated to
+  `.1` above 1 MB).
+- **Orphan process / stuck keys after STOP:** the new engine shuts down cleanly
+  on `SIGTERM`; the interface never uses `pkill -f`, it verifies the pidfile plus
+  `/proc/<pid>/exe`.
+
+## Development
+
+```bash
+cargo build --release          # engine: target/release/macrostat-daemon
+cargo test                     # Rust unit tests
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+QT_QPA_PLATFORM=offscreen python3 -m unittest discover -s tests   # interface tests
+```
+
+CI (`.github/workflows/ci.yml`) runs Rust fmt/clippy/test, the Rust 1.75 MSRV
+build and installation verification on four distribution images (Ubuntu 24.04,
+Debian trixie, Fedora 41, Arch). The version is fixed at `1.0.0`.
+
+## Uninstall
+
+```bash
+./uninstall.sh                    # removes only what the installer added
+./uninstall.sh --purge-profile    # also removes the user profile
+```
+
+The uninstaller removes only: menu/desktop shortcuts marked
+`X-MacroStat-Autogenerated=true`, the icon file if it is identical to the
+installed one, and the udev rule if its content matches ours. Your own
+`.desktop`/icon files, the profile (unless the flag is given), logs, build
+outputs and system packages are **not** removed. System packages installed with
+`makepkg` belong to the package manager; remove them with
+`pacman -R macrostat`.
+
+## License
+
+Copyright (C) 2026 MacroStat contributors.
+
+This project is distributed under the **GNU General Public License v3.0 or
+later** (`GPL-3.0-or-later`). Full text: [`LICENSE`](LICENSE).
+SPDX identifier: `GPL-3.0-or-later`.
+
+PyQt6 is distributed under GPLv3, which is why GPLv3 was chosen. Licenses of
+the third-party components and compatibility notes:
+[`THIRD_PARTY.md`](THIRD_PARTY.md).
+
+Security model and disclosure process: [`SECURITY.md`](SECURITY.md).
+
+---
+
+# MacroStat (Türkçe)
+
 Linux için düşük gecikmeli, tamamen çevrimdışı makro motoru.
 Rust motoru Linux `evdev` + `uinput` kullanır; arayüz PyQt6 tabanlıdır.
 Ubuntu, Debian, Fedora ve Arch/CachyOS desteklenir.
-
-> **English summary:** MacroStat is a low-latency, fully offline macro engine
-> for Linux. The Rust core reads and injects input through `evdev`/`uinput`;
-> the PyQt6 interface manages profiles, the visual editor, the live recorder
-> and the engine lifecycle. No network access, no telemetry, no third-party
-> services. Install with `./install_all.sh` and start with
-> `./start-macrostat.sh`. Licensed GPL-3.0-or-later.
 
 | Dağıtım | Asgari sürüm | Kurulum dosyası |
 |---|---|---|
