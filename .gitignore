@@ -1,0 +1,42 @@
+target/
+__pycache__/
+*.pyc
+*.bak
+*.tmp
+
+# Yerel dağıtım arşivleri
+/dist/
+
+# Derlenmiş motor ikilisi
+/macrostat-daemon
+
+# Yerel tasarım notları ve araç yapılandırması
+/docs/superpowers/
+/.claude/
+
+# makepkg çalışma dizinleri
+/.makepkg/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+
+# Python sanal ortamları
+.venv/
+venv/
+env/
+
+# Ortam değişkenleri ve gizli bilgiler
+.env
+.env.*
+!.env.example
+
+# Log ve işletim sistemi dosyaları
+*.log
+.DS_Store
+Thumbs.db
+
+# Python test ve analiz çıktıları
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
