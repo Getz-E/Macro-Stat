@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MacroStat
+Comment=Low-latency hardware macro engine
+Exec=/usr/bin/macrostat
+Icon=macrostat
+Terminal=false
+Categories=Utility;Game;
+StartupWMClass=MacroStat
