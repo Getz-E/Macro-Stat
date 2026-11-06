@@ -53,7 +53,7 @@ template on first launch). Legacy single-file profiles are migrated on startup.
 ## Quick start
 
 ```bash
-git clone https://github.com/ensargtz/Macro-Stat.git
+git clone https://github.com/Getz-E/Macro-Stat.git
 cd Macro-Stat
 ./install_all.sh          # detects the distro: packages + udev + build + shortcut
 ./start-macrostat.sh
@@ -269,7 +269,7 @@ Kullanıcı profili: `~/.config/macrostat/profile.json` (ilk açılışta depo
 ## Hızlı başlangıç
 
 ```bash
-git clone https://github.com/ensargtz/Macro-Stat.git
+git clone https://github.com/Getz-E/Macro-Stat.git
 cd Macro-Stat
 ./install_all.sh          # dağıtımı algılar: paketler + udev + derleme + kısayol
 ./start-macrostat.sh

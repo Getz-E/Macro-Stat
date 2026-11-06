@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust motoru (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust araç zinciri
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Biçim denetimi
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Birim testleri
+        run: cargo test --release
+
+  msrv:
+    name: Rust 1.75 (MSRV) derleme + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust 1.75 araç zinciri
+        uses: dtolnay/rust-toolchain@1.75
+      - name: Kilitleyiciyle derle ve test et
+        run: cargo test --release --locked
+
+  distro:
+    name: Kurulum doğrulaması (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04
+            image: ubuntu:24.04
+            family: debian
+            distro: ubuntu
+            python_cmd: python3
+          - name: Debian 13
+            image: debian:trixie
+            family: debian
+            distro: debian
+            python_cmd: python3
+          - name: Fedora 41
+            image: fedora:41
+            family: fedora
+            distro: fedora
+            python_cmd: python3
+          - name: Arch Linux
+            image: archlinux:latest
+            family: arch
+            distro: arch
+            python_cmd: python
+    steps:
+      - uses: actions/checkout@v4
+      - name: Paketler, motor araç zinciri ve arayüz doğrulaması
+        env:
+          IMAGE: ${{ matrix.image }}
+          DISTRO_FAMILY: ${{ matrix.family }}
+          EXPECTED_DISTRO: ${{ matrix.distro }}
+          PYTHON_CMD: ${{ matrix.python_cmd }}
+        run: |
+          # Tek container: paketler kurulduktan sonra PyQt6 ve betik
+          # sözdizimi denetimleri aynı ortamda çalışır.
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src \
+            -e DISTRO_FAMILY -e EXPECTED_DISTRO -e PYTHON_CMD \
+            "$IMAGE" bash -c '
+              set -euo pipefail
+              source packaging/install-common.sh
+              install_packages
+              require_rust
+              "$PYTHON_CMD" -c "import PyQt6.QtCore"
+              bash -n install_all.sh install_arch.sh install_ubuntu.sh \
+                install_debian.sh install_fedora.sh uninstall.sh \
+                packaging/install-common.sh
+              echo "Kurulum doğrulaması tamam."
+            '
+
+  audit:
+    name: Bağımlılık güvenlik denetimi (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-audit
+        run: |
+          cargo install --locked cargo-audit
+          cargo audit
+
+  python:
+    name: PyQt6 arayüzü (sözdizimi + birim + duman testi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: PyQt6 kur
+        run: pip install "PyQt6>=6.5"
+      - name: Sözdizimi denetimi
+        run: python -m py_compile gui.py macrostat/*.py
+      - name: Python birim testleri
+        run: python -m unittest discover -s tests -v
+      - name: Betik sözdizimi
+        run: |
+          bash -n start-macrostat.sh packaging/macrostat
+          bash -n install_all.sh install_arch.sh install_ubuntu.sh \
+            install_debian.sh install_fedora.sh uninstall.sh \
+            packaging/install-common.sh
+      - name: Offscreen arayüz duman testi
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'PY'
+          import sys
+          from PyQt6.QtWidgets import QApplication
+          from macrostat import app as app_mod, common
+          app_mod.MacroStatApp.check_and_auto_start_daemon = lambda self: None
+          app_mod.MacroStatApp.update_daemon_status = lambda self: None
+          common.cleanup_daemon = lambda: None
+          app = QApplication(sys.argv)
+          window = app_mod.MacroStatApp()
+          app.processEvents()
+          assert window.tabs.count() == 4
+          window._force_close = True
+          window.close()
+          print("GUI OK")
+          PY
