@@ -46,8 +46,9 @@ class SlidingSwitch(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        bg_color = QColor("#10b981") if self._checked else QColor("#334155")
-        border_color = QColor("#059669") if self._checked else QColor("#475569")
+        palette = theme.current_palette()
+        bg_color = QColor(palette["SUCCESS"] if self._checked else palette["BORDER_STRONG"])
+        border_color = QColor(palette["SUCCESS"] if self._checked else palette["MUTED"])
 
         painter.setBrush(QBrush(bg_color))
         painter.setPen(QPen(border_color, 1))
@@ -60,7 +61,7 @@ class SlidingSwitch(QWidget):
 class KeyCaptureDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(T("🎯 Tetikleyici Tuş veya İkili Kombinasyon Ayarla"))
+        self.setWindowTitle(T("Tetikleyici Tuş veya İkili Kombinasyon Ayarla"))
         self.setFixedSize(480, 280)
         self.captured_key = None
         self.held_keys = []
@@ -77,7 +78,7 @@ class KeyCaptureDialog(QDialog):
             if self.was_daemon_running:
                 self.app_ref.stop_daemon()
                 if hasattr(self.app_ref, "show_autosave_banner"):
-                    self.app_ref.show_autosave_banner(T("🛑 Tuş ayarlanırken makrolar durduruldu."))
+                    self.app_ref.show_autosave_banner(T("Tuş ayarlanırken makrolar durduruldu."))
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -87,7 +88,7 @@ class KeyCaptureDialog(QDialog):
         iso_banner.setObjectName("dangerBanner")
         iso_layout = QHBoxLayout(iso_banner)
         iso_layout.setContentsMargins(4, 2, 4, 2)
-        lbl_iso = QLabel(T("🛑 Makrolar Durduruldu: Tuş ayarlarken diğer makrolar çalıştırılmaz."))
+        lbl_iso = QLabel(T("Makrolar Durduruldu: Tuş ayarlarken diğer makrolar çalıştırılmaz."))
         lbl_iso.setObjectName("dangerText")
         iso_layout.addWidget(lbl_iso)
         layout.addWidget(iso_banner)
@@ -102,14 +103,14 @@ class KeyCaptureDialog(QDialog):
         box_layout = QVBoxLayout(self.box)
         box_layout.setContentsMargins(14, 14, 14, 14)
 
-        self.status_label = QLabel(T("⏳ Tuşa veya ikili kombinasyona basın..."))
+        self.status_label = QLabel(T("Tuşa veya ikili kombinasyona basın..."))
         self.status_label.setObjectName("captureStatus")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         box_layout.addWidget(self.status_label)
         layout.addWidget(self.box)
 
         btn_row = QHBoxLayout()
-        self.btn_confirm = QPushButton(T("✔ Bu Tuşu / Kombinasyonu Kullan"))
+        self.btn_confirm = QPushButton(T("Bu Tuşu / Kombinasyonu Kullan"))
         theme.set_variant(self.btn_confirm, "success")
         self.btn_confirm.clicked.connect(self.accept)
         self.btn_confirm.setEnabled(False)
@@ -131,7 +132,7 @@ class KeyCaptureDialog(QDialog):
                 and not getattr(self.app_ref, "is_manually_stopped", False)):
             self.app_ref.restart_daemon(show_message=False)
             if hasattr(self.app_ref, "show_autosave_banner"):
-                self.app_ref.show_autosave_banner(T("▶ Makro motoru tekrar aktif edildi."))
+                self.app_ref.show_autosave_banner(T("Makro motoru tekrar aktif edildi."))
         super().done(r)
 
     def keyPressEvent(self, event):
@@ -144,9 +145,9 @@ class KeyCaptureDialog(QDialog):
         if qt_key == Qt.Key.Key_Escape:
             if not self.held_keys:
                 self.captured_key = "KEY_ESC"
-                self.status_label.setText(T("✔ Algılandı: {}").format("KEY_ESC"))
+                self.status_label.setText(T("Algılandı: {}").format("KEY_ESC"))
                 theme.set_state(self.status_label, "ok")
-                self.btn_confirm.setText(T("✔ Bu Tuşu Kullan ({})").format("KEY_ESC"))
+                self.btn_confirm.setText(T("Bu Tuşu Kullan ({})").format("KEY_ESC"))
                 self.btn_confirm.setEnabled(True)
                 return
 
@@ -161,26 +162,39 @@ class KeyCaptureDialog(QDialog):
             self.captured_key = combo_str
 
             if len(self.held_keys) >= 2:
-                self.status_label.setText(T("✔ İkili Kombinasyon: {}").format(combo_str))
+                self.status_label.setText(T("İkili Kombinasyon: {}").format(combo_str))
                 theme.set_state(self.status_label, "ok")
             else:
-                self.status_label.setText(T("✔ Algılandı: {}").format(combo_str))
+                self.status_label.setText(T("Algılandı: {}").format(combo_str))
                 theme.set_state(self.status_label, "info")
 
-            self.btn_confirm.setText(T("✔ Bu Tuşu Kullan ({})").format(combo_str))
+            self.btn_confirm.setText(T("Bu Tuşu Kullan ({})").format(combo_str))
             self.btn_confirm.setEnabled(True)
 
     def keyReleaseEvent(self, event):
+        # Bırakılan tuş "basılı" listesinden çıkar; aksi hâlde Ctrl bırakıldıktan
+        # sonra basılan tuş yanlışlıkla kombinasyon sayılır.
+        key_name = self.map_qt_key_to_evdev(event.key(), event.text())
+        if key_name and key_name in self.held_keys:
+            self.held_keys.remove(key_name)
         super().keyReleaseEvent(event)
 
+    def _mouse_button_name(self, btn):
+        if btn == Qt.MouseButton.LeftButton: return "BTN_LEFT"
+        if btn == Qt.MouseButton.RightButton: return "BTN_RIGHT"
+        if btn == Qt.MouseButton.MiddleButton: return "BTN_MIDDLE"
+        if btn in (Qt.MouseButton.BackButton, Qt.MouseButton.XButton1): return "BTN_SIDE"
+        if btn in (Qt.MouseButton.ForwardButton, Qt.MouseButton.XButton2): return "BTN_EXTRA"
+        return None
+
+    def mouseReleaseEvent(self, event):
+        key_name = self._mouse_button_name(event.button())
+        if key_name and key_name in self.held_keys:
+            self.held_keys.remove(key_name)
+        super().mouseReleaseEvent(event)
+
     def mousePressEvent(self, event):
-        btn = event.button()
-        key_name = None
-        if btn == Qt.MouseButton.LeftButton: key_name = "BTN_LEFT"
-        elif btn == Qt.MouseButton.RightButton: key_name = "BTN_RIGHT"
-        elif btn == Qt.MouseButton.MiddleButton: key_name = "BTN_MIDDLE"
-        elif btn == Qt.MouseButton.BackButton or btn == Qt.MouseButton.XButton1: key_name = "BTN_SIDE"
-        elif btn == Qt.MouseButton.ForwardButton or btn == Qt.MouseButton.XButton2: key_name = "BTN_EXTRA"
+        key_name = self._mouse_button_name(event.button())
 
         if key_name:
             if key_name not in self.held_keys:
@@ -189,9 +203,9 @@ class KeyCaptureDialog(QDialog):
                     self.held_keys = self.held_keys[-2:]
             combo_str = "+".join(self.held_keys)
             self.captured_key = combo_str
-            self.status_label.setText(T("✔ Algılandı: {}").format(combo_str))
+            self.status_label.setText(T("Algılandı: {}").format(combo_str))
             theme.set_state(self.status_label, "ok")
-            self.btn_confirm.setText(T("✔ Bu Tuşu Kullan ({})").format(combo_str))
+            self.btn_confirm.setText(T("Bu Tuşu Kullan ({})").format(combo_str))
             self.btn_confirm.setEnabled(True)
 
     def map_qt_key_to_evdev(self, qt_key, text):
@@ -226,5 +240,12 @@ class KeyCaptureDialog(QDialog):
             Qt.Key.Key_Right: "KEY_RIGHT",
             Qt.Key.Key_Print: "KEY_SYSRQ",
         }
-        return mapping.get(qt_key, f"KEY_{text.upper()}" if text and text.isalnum() else None)
+        if qt_key in mapping:
+            return mapping[qt_key]
+        # Son çare yalnızca ASCII harf/rakam için: `isalnum()` Türkçe
+        # karakterlerde de True döner ve motorun tanımadığı KEY_Ş gibi
+        # adlar üretirdi.
+        if text and len(text) == 1 and text.isascii() and text.isalnum():
+            return f"KEY_{text.upper()}"
+        return None
 

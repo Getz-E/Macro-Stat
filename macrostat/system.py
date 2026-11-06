@@ -2,7 +2,14 @@
 # Copyright (C) 2026 MacroStat contributors
 """Sistem sekmesi, motor süreç denetimi, izinler ve yedekleme."""
 
-from . import common, theme
+import os
+import shutil
+import signal
+import subprocess
+import time
+from pathlib import Path
+
+from . import common, theme, transfer
 from .common import *  # noqa: F401,F403
 from .common import _pid_file_pid, _terminate_daemon_pid
 from .widgets import SlidingSwitch, KeyCaptureDialog  # noqa: F401
@@ -17,53 +24,98 @@ class SystemMixin:
         layout.addWidget(self.sys_info)
 
         p_box = QHBoxLayout()
-        btn_fix = QPushButton(T("🛡️ Donanım İzinlerini Otomatik Düzelt (udev)"))
+        btn_fix = QPushButton(T("Donanım İzinlerini Otomatik Düzelt (udev)"))
         theme.set_variant(btn_fix, "primary")
         btn_fix.clicked.connect(self.fix_permissions)
         p_box.addWidget(btn_fix)
 
-        btn_ref = QPushButton(T("🔄 Durumu Yenile"))
+        btn_ref = QPushButton(T("Durumu Yenile"))
         btn_ref.clicked.connect(self.refresh_system_status)
         p_box.addWidget(btn_ref)
-
-        btn_restore = QPushButton(T("⏪ Son Yedeği Geri Yükle"))
-        btn_restore.clicked.connect(self.restore_last_backup)
-        p_box.addWidget(btn_restore)
-
+        p_box.addStretch()
         layout.addLayout(p_box)
+
+        b_box = QHBoxLayout()
+        btn_backup = QPushButton(T("Yedekle…"))
+        btn_backup.clicked.connect(self.backup_all_profiles)
+        b_box.addWidget(btn_backup)
+
+        btn_restore = QPushButton(T("Geri Yükle…"))
+        btn_restore.clicked.connect(self.restore_profiles_from_file)
+        b_box.addWidget(btn_restore)
+
+        btn_onboarding = QPushButton(T("Kurulumu yeniden çalıştır"))
+        btn_onboarding.clicked.connect(self.run_onboarding_wizard)
+        b_box.addWidget(btn_onboarding)
+        b_box.addStretch()
+        layout.addLayout(b_box)
         self.refresh_system_status()
 
-    def restore_last_backup(self):
-        backup = common.PROFILE_PATH.with_name(common.PROFILE_PATH.name + ".bak")
-        if not backup.exists():
-            QMessageBox.warning(self, T("Yedek Geri Yükleme"),
-                                T("Yedek dosyası bulunamadı."))
+    def backup_all_profiles(self):
+        if not self.all_profiles:
+            QMessageBox.warning(self, T("Yedekleme"),
+                                T("Yedeklenecek profil bulunamadı."))
             return
+        default_name = "macrostat-yedek-{}.json".format(time.strftime("%Y%m%d-%H%M"))
+        path, _ = QFileDialog.getSaveFileName(
+            self, T("Profilleri Yedekle"),
+            str(Path.home() / default_name), "JSON (*.json)")
+        if not path:
+            return
+        try:
+            transfer.export_profiles(self.all_profiles, path, self.active_profile_id)
+            self.show_autosave_banner(
+                T("{} profil yedeklendi: {}").format(len(self.all_profiles), path))
+        except transfer.TransferError as exc:
+            QMessageBox.critical(self, T("Yedekleme Hatası"), str(exc))
+
+    def restore_profiles_from_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, T("Yedeği Geri Yükle"), str(Path.home()), "JSON (*.json)")
+        if not path:
+            return
+        try:
+            data = transfer.load_payload(path)
+            existing_macros = {
+                m.get("id") for p in self.all_profiles
+                for m in p.get("macros", []) if isinstance(m, dict) and m.get("id")
+            }
+            existing_profiles = {p.get("id") for p in self.all_profiles if p.get("id")}
+            result = transfer.import_payload(data, existing_macros, existing_profiles)
+        except transfer.TransferError as exc:
+            QMessageBox.critical(self, T("Yedek Geri Yükleme"), str(exc))
+            return
+
+        if not result["profiles"]:
+            QMessageBox.warning(
+                self, T("Yedek Geri Yükleme"),
+                T("Bu dosyada geri yüklenecek profil yok. Makroları "
+                  "Makrolar sekmesindeki 'İçe Aktar…' ile ekleyin."))
+            return
+
         answer = QMessageBox.question(
             self, T("Yedek Geri Yükleme"),
-            T("Yedek geri yüklensin mi? Mevcut profil bu yedekle değiştirilecek."),
+            T("{} profil geri yüklenecek. Aynı adlı profiller '(2)', '(3)' "
+              "ekleriyle eklenir; mevcut profiller silinmez. Devam edilsin mi?").format(
+                len(result["profiles"])),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
+
         try:
-            raw = backup.read_bytes()
-            json.loads(raw.decode("utf-8"))  # geçerlilik denetimi
-            tmp = common.PROFILE_PATH.with_name(common.PROFILE_PATH.name + ".restore.tmp")
-            with open(tmp, "wb") as f:
-                f.write(raw)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, common.PROFILE_PATH)
-            self.profile_data = self.load_profile()
-            common.PANIC_KEY = self.profile_data.get("panicKey") or "KEY_PAUSE"
+            used_names = {p.get("name") for p in self.all_profiles if p.get("name")}
+            for profile in result["profiles"]:
+                profile["name"] = transfer.unique_name(profile.get("name"), used_names)
+                used_names.add(profile["name"])
+                self.all_profiles.append(profile)
             self.populate_profile_combo()
+            self.save_profile_to_disk(restart_daemon=True)
             self.refresh_macro_table()
-            self.apply_profile_to_daemon()
-            self.show_autosave_banner(T("Profil yedeği geri yüklendi."))
-        except Exception as e:
-            QMessageBox.critical(self, T("Yedek Geri Yükleme"),
-                                 T("Yedek okunamadı: ") + str(e))
+            self.show_autosave_banner(
+                T("{} profil geri yüklendi.").format(len(result["profiles"])))
+        except Exception as exc:
+            QMessageBox.critical(self, T("Yedek Geri Yükleme"), str(exc))
 
     def refresh_system_status(self):
         uinput_ok = os.access("/dev/uinput", os.W_OK)
@@ -75,8 +127,8 @@ class SystemMixin:
             "Acil Durdurma Tuşu (STOP): {}\n"
             "Log Dosyası: {}\n"
         ).format(
-            T("✔ Erişilebilir (Yazma İzni Var)") if uinput_ok
-            else T("❌ Erişim Yok (İzin Gerekli)"),
+            T("Erişilebilir (Yazma İzni Var)") if uinput_ok
+            else T("Erişim Yok (İzin Gerekli)"),
             common.DAEMON_BIN or T("İkili Dosya Bulunamadı (cargo build --release çalıştırın)"),
             common.PROFILE_PATH.resolve() if common.PROFILE_PATH else T("Bulunamadı"),
             common.PANIC_KEY,
@@ -86,36 +138,16 @@ class SystemMixin:
 
     def fix_permissions(self):
         try:
-            import getpass
-            username = os.environ.get("SUDO_USER") or os.environ.get("USER") or getpass.getuser()
-            if not username or not all(c.isalnum() or c in "._-" for c in username):
-                raise ValueError(T("Geçersiz kullanıcı adı"))
-
-            # Geniş chmod 666 / setfacl yerine yalnızca udev uaccess + input grubu.
-            script = (
-                "modprobe uinput 2>/dev/null || true\n"
-                "cat > /etc/udev/rules.d/99-cachymacro.rules <<'EOF'\n"
-                'KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", '
-                'OPTIONS+="static_node=uinput", GROUP="input", MODE="0660"\n'
-                'SUBSYSTEM=="input", KERNEL=="event*", TAG+="uaccess", '
-                'GROUP="input", MODE="0660"\n'
-                "EOF\n"
-                "udevadm control --reload-rules\n"
-                "udevadm trigger\n"
-                f"usermod -aG input {username}\n"
-            )
-            elevated = ["pkexec", "sh", "-c", script] if shutil.which("pkexec") \
-                else ["sudo", "sh", "-c", script]
-            result = subprocess.run(elevated)
-            if result.returncode != 0:
-                raise RuntimeError(T("Yetkilendirme başarısız (çıkış kodu {})").format(result.returncode))
+            ok, detail = common.install_udev_rule()
+            if not ok:
+                raise RuntimeError(T("İzinler kurulamadı: {}").format(detail))
             time.sleep(0.3)
             self.restart_daemon(show_message=False)
             self.refresh_system_status()
             QMessageBox.information(
                 self, T("İzinler Düzeltildi"),
                 T("udev kuralı kuruldu ve motor başlatıldı.\n"
-                  "Grup üyeliği yeni oturumda etkinleşir; sorun sürerse oturumu kapatıp açın."),
+                  "Kural yeni oturumda etkinleşir; sorun sürerse oturumu kapatıp açın."),
             )
         except Exception as e:
             QMessageBox.critical(self, T("Hata"), str(e))
@@ -146,20 +178,23 @@ class SystemMixin:
     def update_daemon_status(self):
         if getattr(self, "is_manually_stopped", False):
             self.lbl_stopped.show()
-            self.status_badge.setText(T("🔴 Motor Durduruldu (STOP)"))
+            self.status_badge.setText(T("Motor Durduruldu (STOP)"))
             theme.set_state(self.status_badge, "error")
+            self.btn_restart_after_stop.setEnabled(True)
+            self.start_restart_watch()
             return
+        self.btn_restart_after_stop.setEnabled(False)
         if getattr(self, "was_editor_daemon_running", False):
-            self.status_badge.setText(T("🛑 Düzenleme Modu (Beklemede)"))
+            self.status_badge.setText(T("Düzenleme Modu (Beklemede)"))
             theme.set_state(self.status_badge, "info")
             return
         if self.is_daemon_running():
             self.failed_status_checks = 0
-            self.status_badge.setText(T("🟢 Aktif"))
+            self.status_badge.setText(T("Aktif"))
             theme.set_state(self.status_badge, "ok")
-            self.btn_view_log.setText("📋")
-            self.btn_view_log.setToolTip(T("📋 Günlüğü İncele"))
-            theme.set_variant(self.btn_view_log, "")
+            if hasattr(self, 'act_view_log'):
+                self.act_view_log.setText(T("Günlüğü İncele"))
+                self.act_view_log.setIcon(theme.icon("document-preview"))
             if hasattr(self, 'btn_quick_fix'):
                 self.btn_quick_fix.hide()
         else:
@@ -167,22 +202,22 @@ class SystemMixin:
             if self._daemon_stopped_by_panic():
                 self.is_manually_stopped = True
                 self.lbl_stopped.show()
-                self.status_badge.setText(T("🔴 Motor Durduruldu (STOP)"))
+                self.status_badge.setText(T("Motor Durduruldu (STOP)"))
                 theme.set_state(self.status_badge, "error")
-                if hasattr(self, 'btn_restart_daemon'):
-                    theme.set_variant(self.btn_restart_daemon, "success")
+                self.btn_restart_after_stop.setEnabled(True)
+                self.start_restart_watch()
                 return
             self.failed_status_checks += 1
             if self.failed_status_checks >= 2:
                 exit_code = self.daemon_proc.poll() if self.daemon_proc is not None else None
                 if exit_code not in (None, 0):
-                    self.status_badge.setText(T("🔴 Motor Çöktü (kod {})").format(exit_code))
+                    self.status_badge.setText(T("Motor Çöktü (kod {})").format(exit_code))
                 else:
-                    self.status_badge.setText(T("🔴 Motor Durduruldu"))
+                    self.status_badge.setText(T("Motor Durduruldu"))
                 theme.set_state(self.status_badge, "error")
-                self.btn_view_log.setText("⚠️")
-                self.btn_view_log.setToolTip(T("⚠️ Hatayı İncele"))
-                theme.set_variant(self.btn_view_log, "danger")
+                if hasattr(self, 'act_view_log'):
+                    self.act_view_log.setText(T("Hatayı İncele"))
+                    self.act_view_log.setIcon(theme.icon("dialog-error"))
                 if hasattr(self, 'btn_quick_fix'):
                     self.btn_quick_fix.show()
 
@@ -230,7 +265,7 @@ class SystemMixin:
                 getattr(self, "was_recording_daemon_running", False):
             return
         if self.is_daemon_running() and self.request_daemon_reload():
-            self.show_autosave_banner(T("♻️ Makro motoru yeniden başlatılmadan güncellendi."))
+            self.show_autosave_banner(T("Makro motoru yeniden başlatılmadan güncellendi."))
             return
         self.restart_daemon(show_message=False)
 
@@ -241,8 +276,9 @@ class SystemMixin:
             return False
         self.is_manually_stopped = False
         self.lbl_stopped.hide()
-        if hasattr(self, 'btn_restart_daemon'):
-            theme.set_variant(self.btn_restart_daemon, "")
+        self.stop_restart_watch()
+        if hasattr(self, "btn_restart_after_stop"):
+            self.btn_restart_after_stop.setEnabled(False)
 
         common.DAEMON_BIN, common.PROFILE_PATH = common.locate_paths()
         try:
@@ -265,15 +301,15 @@ class SystemMixin:
                 cargo_dir = SCRIPT_DIR if (SCRIPT_DIR / "Cargo.toml").exists() else None
 
                 if cargo_dir and shutil.which("cargo"):
-                    self.status_badge.setText(T("⚙️ Motor derleniyor..."))
+                    self.status_badge.setText(T("Motor derleniyor..."))
                     theme.set_state(self.status_badge, "info")
                     QApplication.processEvents()
                     try:
                         subprocess.run(["cargo", "build", "--release"], cwd=cargo_dir, check=False)
-                        built = cargo_dir / "target" / "release" / "cachymacro-daemon"
+                        built = cargo_dir / "target" / "release" / "macrostat-daemon"
                         if built.exists():
-                            shutil.copy2(built, SCRIPT_DIR / "cachymacro-daemon")
-                            os.chmod(SCRIPT_DIR / "cachymacro-daemon", 0o755)
+                            shutil.copy2(built, SCRIPT_DIR / "macrostat-daemon")
+                            os.chmod(SCRIPT_DIR / "macrostat-daemon", 0o755)
                         common.DAEMON_BIN, common.PROFILE_PATH = common.locate_paths()
                     except Exception:
                         pass
@@ -314,40 +350,91 @@ class SystemMixin:
             if show_message:
                 QMessageBox.critical(self, T("Hata"), str(e))
 
+    def start_restart_watch(self):
+        """STOP sonrası atanmış tuşu dinleyen hafif izleyiciyi başlatır."""
+        if self.restart_watch_proc is not None:
+            if getattr(self, "_restart_watch_key", None) == self.restart_key:
+                return
+            # Tuş değişti: eski izleyici yeni tuşu dinlemez, yenisiyle değiştirilir.
+            self.stop_restart_watch()
+        common.DAEMON_BIN, common.PROFILE_PATH = common.locate_paths()
+        if not common.DAEMON_BIN or not common.DAEMON_BIN.exists():
+            return
+        command = common.restart_watch_command(common.DAEMON_BIN, self.restart_key)
+        proc = QProcess(self)
+        proc.setProgram(command[0])
+        proc.setArguments(command[1:])
+        proc.finished.connect(self._restart_watch_finished)
+        proc.errorOccurred.connect(lambda _err: self.stop_restart_watch())
+        self.restart_watch_proc = proc
+        self._restart_watch_key = self.restart_key
+        proc.start()
+
+    def stop_restart_watch(self):
+        proc = self.restart_watch_proc
+        self.restart_watch_proc = None
+        self._restart_watch_key = None
+        if proc is None:
+            return
+        try:
+            # Bilinçli durdurulan izleyicinin `finished` sinyali hata banner'ı üretmesin.
+            proc.finished.disconnect()
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            if proc.state() != QProcess.ProcessState.NotRunning:
+                proc.terminate()
+        except Exception:
+            pass
+        proc.deleteLater()
+
+    def _restart_watch_finished(self, exit_code, _exit_status):
+        proc = self.restart_watch_proc
+        if proc is None:
+            # Zaten durdurulmuş (elle yeniden başlatma/kapanış) izleyicinin geç gelen çıkışı.
+            return
+        self.restart_watch_proc = None
+        self._restart_watch_key = None
+        proc.deleteLater()
+        if exit_code == common.RESTART_WATCH_EXIT_CODE:
+            self.show_autosave_banner(T(
+                "Yeniden başlatma tuşuna basıldı; makro motoru açılıyor."))
+            self.restart_daemon(show_message=False, force=True)
+        elif exit_code not in (0, None):
+            self.show_autosave_banner(T(
+                "Yeniden başlatma tuşu dinlenemedi (kod {}).").format(exit_code))
+
+    def restart_after_stop(self):
+        """STOP sonrası motoru düğmeyle yeniden başlatır."""
+        self.stop_restart_watch()
+        self.restart_daemon(show_message=False, force=True)
+        if self.is_daemon_running():
+            self.show_autosave_banner(T("Makro motoru yeniden başlatıldı."))
+
     def trigger_panic(self):
         try:
             self.is_manually_stopped = True
             self.lbl_stopped.show()
             self.stop_daemon()
-            self.status_badge.setText(T("🔴 Motor Durduruldu (STOP)"))
+            self.status_badge.setText(T("Motor Durduruldu (STOP)"))
             theme.set_state(self.status_badge, "error")
-            theme.set_variant(self.btn_restart_daemon, "success")
-            self.show_autosave_banner(T("🛑 STOP Tetiklendi! Motor 'Yeniden Başlat' butonuna basılana dek kapalı kalacaktır."))
+            self.btn_restart_after_stop.setEnabled(True)
+            self.start_restart_watch()
+            self.show_autosave_banner(T(
+                "STOP Tetiklendi! Motor 'Yeniden Başlat' düğmesine veya {} tuşuna "
+                "basılana dek kapalı kalacaktır.").format(self.restart_key))
         except Exception:
             pass
 
-    def show_daemon_log(self):
-        content = T("Log dosyası henüz oluşmadı.")
-        if LOG_FILE.exists():
-            try:
-                with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-            except Exception as e:
-                content = T("Log okunamadı: ") + str(e)
-        dlg = QDialog(self)
-        dlg.setWindowTitle(T("Motor Günlüğü"))
-        dlg.resize(600, 400)
-        l = QVBoxLayout(dlg)
-        txt = QTextEdit()
-        txt.setReadOnly(True)
-        txt.setPlainText(content)
-        l.addWidget(txt)
-        dlg.exec()
-
     def closeEvent(self, event):
+        self.stop_restart_watch()
         if getattr(self, "recording_active", False):
             self.recording_active = False
             self.releaseKeyboard()
+        mouse_proc = getattr(self, "_mouse_record_proc", None)
+        if mouse_proc is not None:
+            mouse_proc.terminate()
+            mouse_proc.waitForFinished(1500)
         if not getattr(self, "_force_close", False) and not self.confirm_discard_editor_changes():
             event.ignore()
             return

@@ -2,9 +2,84 @@
 # Copyright (C) 2026 MacroStat contributors
 """Pencere kurulumu, profil yaşam döngüsü, dil ve sekme yönetimi."""
 
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+from PyQt6.QtGui import QAction, QActionGroup
+
 from . import common, theme
 from .common import *  # noqa: F401,F403
+from .logpanel import LogPanel
+from .nav import PageStack
 from .widgets import SlidingSwitch, KeyCaptureDialog  # noqa: F401
+
+#: Profil dosyası dışarıdan düzenlenebilir; görünen metinler ve sayılar
+#: yüklenirken doğrulanır ki bozuk bir dosya arayüzü kilitlemesin.
+_NAME_LIMIT = 200
+_DESCRIPTION_LIMIT = 4000
+#: Aralıklar düzenleyicideki QSpinBox sınırlarıyla aynıdır; aksi hâlde geçerli
+#: bir profil değeri arayüzde açıldığında sessizce kırpılırdı.
+_MACRO_NUMBERS = {
+    "repeatCount": (1, 1, 9999),
+    "doubleTapTimeoutMs": (300, 50, 5_000),
+    "holdDurationMs": (300, 50, 10_000),
+}
+
+
+def build_exclusive_menu(menu, choices, current, on_pick):
+    """Birbirini dışlayan işaretli menü öğeleri ekler.
+
+    ``QActionGroup`` kullanılmazsa Qt her işaretli öğeyi bağımsız yönetir:
+    yeni tema seçildiğinde eski temanın işareti kalkmaz. Grup, seçim
+    değiştiğinde önceki öğeyi kendiliğinden temizler.
+    """
+    group = QActionGroup(menu)
+    group.setExclusive(True)
+    for value, label in choices:
+        action = menu.addAction(label)
+        action.setCheckable(True)
+        action.setChecked(value == current)
+        group.addAction(action)
+        action.triggered.connect(
+            lambda _checked=False, picked=value: on_pick(picked))
+    return group
+
+
+def sanitize_loaded_profile(profile):
+    """Yüklenen profil sözlüğünü yerinde temizler ve döndürür."""
+    if not isinstance(profile, dict):
+        return profile
+    for field, limit in (("name", _NAME_LIMIT),
+                         ("description", _DESCRIPTION_LIMIT),
+                         ("virtualDeviceName", _NAME_LIMIT)):
+        if field in profile and not isinstance(profile[field], str):
+            profile[field] = ""
+        if isinstance(profile.get(field), str):
+            profile[field] = common.sanitize_display_text(
+                profile[field], max_len=limit)
+    macros = profile.get("macros")
+    if isinstance(macros, list):
+        for macro in macros:
+            if not isinstance(macro, dict):
+                continue
+            for field, limit in (("name", _NAME_LIMIT),
+                                 ("description", _DESCRIPTION_LIMIT)):
+                if isinstance(macro.get(field), str):
+                    macro[field] = common.sanitize_display_text(
+                        macro[field], max_len=limit)
+                elif field in macro:
+                    macro[field] = ""
+            for field, (default, low, high) in _MACRO_NUMBERS.items():
+                if field in macro:
+                    macro[field] = common.coerce_int(
+                        macro[field], default, low, high)
+    return profile
+
 
 class CoreMixin:
     """Pencere kurulumu, profil yaşam döngüsü, dil ve sekme yönetimi."""
@@ -12,12 +87,15 @@ class CoreMixin:
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MacroStat")
-        self.resize(1000, 680)
-        self.setMinimumSize(850, 550)
+        self.resize(1100, 720)
+        self.setMinimumSize(900, 600)
 
         self.profile_data = self.load_profile()
         # STOP tuşu aktif profilden yüklenir; varsayılan yalnızca yedektir.
         common.PANIC_KEY = self.profile_data.get("panicKey") or common.PANIC_KEY
+        self.restart_key = common.normalize_restart_key(
+            self.profile_data.get("restartKey"))
+        self.restart_watch_proc = None
         self._editor_snapshot = None
         self.selected_macro_idx = 0
         self.recording_active = False
@@ -29,12 +107,17 @@ class CoreMixin:
         self.was_editor_daemon_running = False
 
         self.setup_ui()
-        self.check_and_auto_start_daemon()
+        self._onboarding_pending = not load_settings().get("onboarding_completed", False)
+        if not self._onboarding_pending:
+            self.check_and_auto_start_daemon()
 
         self.status_timer = QTimer(self)
         self.status_timer.timeout.connect(self.update_daemon_status)
         self.status_timer.start(1500)
         self.update_daemon_status()
+        if self._onboarding_pending:
+            # Pencere göründükten sonra ilk kurulum sihirbazı açılır.
+            QTimer.singleShot(150, self.maybe_run_onboarding)
 
     def load_profile(self):
         self.all_profiles = []
@@ -44,14 +127,17 @@ class CoreMixin:
                 with open(common.PROFILE_PATH, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if data.get("profiles") and isinstance(data["profiles"], list) and len(data["profiles"]) > 0:
-                        self.all_profiles = data["profiles"]
+                        self.all_profiles = [
+                            sanitize_loaded_profile(p) for p in data["profiles"]
+                            if isinstance(p, dict)]
+                    if self.all_profiles:
                         self.active_profile_id = data.get("activeProfileId", self.all_profiles[0].get("id", ""))
                         for p in self.all_profiles:
                             if p.get("id") == self.active_profile_id:
                                 return p
                         return self.all_profiles[0]
                     elif data.get("macros"):
-                        self.all_profiles = [data]
+                        self.all_profiles = [sanitize_loaded_profile(data)]
                         self.active_profile_id = data.get("id", "profile-cachy")
                         return data
             except Exception as e:
@@ -65,16 +151,17 @@ class CoreMixin:
                     seed_data = json.load(f)
                 profiles = seed_data.get("profiles") or []
                 if profiles:
-                    default_p = profiles[0]
+                    default_p = sanitize_loaded_profile(profiles[0])
                 elif seed_data.get("macros"):
-                    default_p = seed_data
+                    default_p = sanitize_loaded_profile(seed_data)
             except Exception as e:
                 print(f"[UYARI] Varsayılan profil şablonu okunamadı: {e}")
         if not default_p:
             default_p = {
-                "id": "profile-cachy-default",
+                "id": "profile-default",
                 "name": "MacroStat Varsayılan Profil",
                 "panicKey": "KEY_PAUSE",
+                "restartKey": common.DEFAULT_RESTART_KEY,
                 "virtualDeviceName": "MacroStat Virtual Engine",
                 "defaultJitterMs": 2,
                 "macros": [],
@@ -86,6 +173,9 @@ class CoreMixin:
         try:
             # Profil kendi panicKey değerini korur; özel değer ezilmez.
             self.profile_data.setdefault("panicKey", common.PANIC_KEY)
+            self.profile_data.setdefault(
+                "restartKey", common.normalize_restart_key(
+                    self.profile_data.get("restartKey")))
             # Makro ve eylemlerin geçerli ID ve alanlara sahip olduğundan emin ol
             for m in self.profile_data.get("macros", []):
                 if not m.get("id"):
@@ -113,18 +203,33 @@ class CoreMixin:
             target_save_path = common.PROFILE_PATH
             target_save_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Atomik yazma: geçici dosya + fsync + os.replace, önceki sürüm .bak olarak korunur.
-            tmp_path = target_save_path.with_name(target_save_path.name + ".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            if target_save_path.exists():
+            # Atomik yazma: 0600 geçici dosya + fsync + os.replace; eski sürüm .bak.
+            # Profil adları/makrolar kişisel veridir; başka kullanıcılar okuyamaz.
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=target_save_path.name + ".", suffix=".tmp",
+                dir=str(target_save_path.parent))
+            tmp_path = Path(tmp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    os.fchmod(f.fileno(), 0o600)
+                    json.dump(payload, f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                if target_save_path.exists():
+                    backup_path = target_save_path.with_name(
+                        target_save_path.name + ".bak")
+                    try:
+                        shutil.copy2(target_save_path, backup_path)
+                        os.chmod(backup_path, 0o600)
+                    except OSError:
+                        pass
+                os.replace(tmp_path, target_save_path)
+            finally:
                 try:
-                    shutil.copy2(target_save_path, target_save_path.with_name(target_save_path.name + ".bak"))
+                    if tmp_path.exists():
+                        tmp_path.unlink()
                 except OSError:
                     pass
-            os.replace(tmp_path, target_save_path)
 
             if restart_daemon:
                 self.apply_profile_to_daemon()
@@ -144,38 +249,31 @@ class CoreMixin:
         header_frame = QFrame()
         header_frame.setObjectName("headerFrame")
         header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(14, 10, 14, 10)
+        header_layout.setContentsMargins(12, 8, 12, 8)
+        header_layout.setSpacing(8)
 
         title_label = QLabel("MacroStat")
         title_label.setObjectName("appTitle")
         header_layout.addWidget(title_label)
 
-        lbl_prof = QLabel(T("Profil:"))
-        lbl_prof.setObjectName("fieldLabel")
-        header_layout.addWidget(lbl_prof)
-
         self.combo_profiles = QComboBox()
         self.combo_profiles.setObjectName("profileCombo")
+        self.combo_profiles.setToolTip(T("Aktif profil"))
         header_layout.addWidget(self.combo_profiles)
 
-        # Profil işlemleri tek menüde: yeni / yeniden adlandır / sil / dışa-içe aktar
+        # Profil işlemleri tek menüde: yeni / yeniden adlandır / sil
         self.btn_profile_menu = QToolButton()
         self.btn_profile_menu.setObjectName("profileMenu")
         self.btn_profile_menu.setText("⋯")
         self.btn_profile_menu.setToolTip(T("Profil işlemleri"))
         self.btn_profile_menu.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         profile_menu = QMenu(self.btn_profile_menu)
-        act_new = profile_menu.addAction(T("➕ Yeni Profil"))
+        act_new = profile_menu.addAction(theme.icon("list-add"), T("Yeni Profil"))
         act_new.triggered.connect(self.create_new_profile_dialog)
-        act_rename = profile_menu.addAction(T("✏️ Yeniden Adlandır"))
+        act_rename = profile_menu.addAction(theme.icon("edit-rename"), T("Yeniden Adlandır"))
         act_rename.triggered.connect(self.rename_current_profile)
-        act_delete = profile_menu.addAction(T("🗑️ Profili Sil"))
+        act_delete = profile_menu.addAction(theme.icon("edit-delete"), T("Profili Sil"))
         act_delete.triggered.connect(self.delete_current_profile)
-        profile_menu.addSeparator()
-        act_export = profile_menu.addAction(T("📤 Dışa Aktar"))
-        act_export.triggered.connect(self.export_profile)
-        act_import = profile_menu.addAction(T("📥 İçe Aktar"))
-        act_import.triggered.connect(self.import_profile)
         self.btn_profile_menu.setMenu(profile_menu)
         header_layout.addWidget(self.btn_profile_menu)
 
@@ -195,80 +293,91 @@ class CoreMixin:
         self.lbl_stopped.hide()
         header_layout.addWidget(self.lbl_stopped)
 
-        self.status_badge = QLabel(T("● Kontrol ediliyor..."))
+        self.status_badge = QLabel(T("Kontrol ediliyor..."))
         self.status_badge.setObjectName("statusBadge")
         header_layout.addWidget(self.status_badge)
 
-        self.btn_quick_fix = QPushButton(T("🛡️ İzinleri Düzelt & Başlat"))
+        self.btn_quick_fix = QPushButton(T("İzinleri Düzelt & Başlat"))
+        self.btn_quick_fix.setIcon(theme.icon("security-high"))
         theme.set_variant(self.btn_quick_fix, "primary")
         self.btn_quick_fix.clicked.connect(self.fix_permissions)
         self.btn_quick_fix.hide()
         header_layout.addWidget(self.btn_quick_fix)
 
-        self.btn_lang = QToolButton()
-        self.btn_lang.setObjectName("iconButton")
-        self.btn_lang.setText("🌐")
-        self.btn_lang.setToolTip(T("Dil / Language"))
-        self.btn_lang.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        lang_menu = QMenu(self.btn_lang)
-        current_lang = get_language()
-        for code, label in LANGUAGES.items():
-            action = lang_menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(code == current_lang)
-            action.triggered.connect(
-                lambda _checked=False, lang=code: self.change_language(lang))
-        self.btn_lang.setMenu(lang_menu)
-        header_layout.addWidget(self.btn_lang)
-
-        self.btn_view_log = QToolButton()
-        self.btn_view_log.setObjectName("iconButton")
-        self.btn_view_log.setText("📋")
-        self.btn_view_log.setToolTip(T("📋 Günlüğü İncele"))
-        self.btn_view_log.clicked.connect(self.show_daemon_log)
-        header_layout.addWidget(self.btn_view_log)
-
-        self.btn_restart_daemon = QToolButton()
-        self.btn_restart_daemon.setObjectName("iconButton")
-        self.btn_restart_daemon.setText("🔄")
-        self.btn_restart_daemon.setToolTip(T("🔄 Motoru Yeniden Başlat"))
-        self.btn_restart_daemon.clicked.connect(
-            lambda: self.restart_daemon(show_message=True, force=True))
-        header_layout.addWidget(self.btn_restart_daemon)
-
-        # STOP Butonu + Çark Butonu
-        panic_box = QWidget()
-        p_layout = QHBoxLayout(panic_box)
-        p_layout.setContentsMargins(0, 0, 0, 0)
-        p_layout.setSpacing(3)
-
-        self.btn_panic = QPushButton("🛑 STOP")
+        self.btn_panic = QPushButton(T("STOP"))
+        self.btn_panic.setIcon(theme.icon("process-stop"))
         theme.set_variant(self.btn_panic, "danger")
+        self.btn_panic.setToolTip(T("Tüm makroları hemen durdur"))
         self.btn_panic.clicked.connect(self.trigger_panic)
-        p_layout.addWidget(self.btn_panic)
+        header_layout.addWidget(self.btn_panic)
 
-        self.btn_panic_settings = QToolButton()
-        self.btn_panic_settings.setObjectName("iconButton")
-        self.btn_panic_settings.setText("⚙")
-        self.btn_panic_settings.setToolTip(T("Acil durdurma tuşunu ayarla"))
-        theme.set_variant(self.btn_panic_settings, "muted")
-        self.btn_panic_settings.clicked.connect(self.configure_panic_key)
-        p_layout.addWidget(self.btn_panic_settings)
+        # STOP sonrası motoru yeniden başlatan düğme (STOP'un hemen yanında).
+        self.btn_restart_after_stop = QPushButton(T("Yeniden Başlat"))
+        self.btn_restart_after_stop.setIcon(theme.icon("view-refresh"))
+        self.btn_restart_after_stop.setToolTip(T(
+            "STOP sonrası motoru yeniden başlatır; atanmış tuş da aynı işi yapar"))
+        self.btn_restart_after_stop.setEnabled(False)
+        self.btn_restart_after_stop.clicked.connect(self.restart_after_stop)
+        header_layout.addWidget(self.btn_restart_after_stop)
 
-        header_layout.addWidget(panic_box)
+        # Taşma menüsü: günlük, yeniden başlat, dil, tema, STOP tuşu
+        self.btn_overflow = QToolButton()
+        self.btn_overflow.setObjectName("iconButton")
+        self.btn_overflow.setText("⋯")
+        self.btn_overflow.setToolTip(T("Diğer işlemler"))
+        self.btn_overflow.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        overflow = QMenu(self.btn_overflow)
+
+        self.act_view_log = QAction(theme.icon("document-preview"),
+                                    T("Günlüğü İncele"), self)
+        self.act_view_log.triggered.connect(self.show_log_panel)
+        overflow.addAction(self.act_view_log)
+
+        self.act_restart_daemon = QAction(theme.icon("view-refresh"),
+                                          T("Motoru Yeniden Başlat"), self)
+        self.act_restart_daemon.triggered.connect(
+            lambda: self.restart_daemon(show_message=True, force=True))
+        overflow.addAction(self.act_restart_daemon)
+
+        overflow.addSeparator()
+
+        lang_menu = overflow.addMenu(theme.icon("applications-internet"),
+                                     T("Dil / Language"))
+        build_exclusive_menu(lang_menu, list(LANGUAGES.items()),
+                             get_language(), self.change_language)
+
+        theme_menu = overflow.addMenu(theme.icon("preferences-desktop-theme"),
+                                      T("Tema"))
+        build_exclusive_menu(
+            theme_menu,
+            (("system", T("Sistem")), ("dark", T("Koyu")), ("light", T("Açık"))),
+            load_settings().get("theme", "dark"), self.change_theme_mode)
+
+        panic_action = overflow.addAction(theme.icon("preferences-desktop-keyboard"),
+                                          T("STOP Tuşunu Ayarla"))
+        panic_action.triggered.connect(self.configure_panic_key)
+
+        self.act_configure_restart_key = overflow.addAction(
+            theme.icon("preferences-desktop-keyboard"),
+            T("Yeniden Başlatma Tuşunu Ayarla"))
+        self.act_configure_restart_key.triggered.connect(
+            self.configure_restart_key)
+        self.btn_overflow.setMenu(overflow)
+        header_layout.addWidget(self.btn_overflow)
+
         main_layout.addWidget(header_frame)
 
-        # Sekmeler
-        self.tabs = QTabWidget()
+        # Sayfalar: sol kenar çubuğu + yığın
+        self.tabs = PageStack()
         self.tab_macros = QWidget()
         self.tab_editor = QWidget()
         self.tab_recorder = QWidget()
         self.tab_system = QWidget()
 
-        self.tabs.addTab(self.tab_macros, T("📋 Makrolar"))
-        self.tabs.addTab(self.tab_editor, T("🛠️ Makro Düzenleyici"))
-        self.tabs.addTab(self.tab_recorder, T("🔴 Canlı Tuş Kaydedici"))
-        self.tabs.addTab(self.tab_system, T("⚙️ Sistem & Kılavuz"))
+        self.tabs.add_page(self.tab_macros, T("Makrolar"), "view-list-details")
+        self.tabs.add_page(self.tab_editor, T("Makro Düzenleyici"), "document-edit")
+        self.tabs.add_page(self.tab_recorder, T("Canlı Tuş Kaydedici"), "media-record")
+        self.tabs.add_page(self.tab_system, T("Sistem & Kılavuz"), "configure")
 
         self.setup_macros_tab()
         self.setup_editor_tab()
@@ -276,7 +385,25 @@ class CoreMixin:
         self.setup_system_tab()
 
         self.tabs.currentChanged.connect(self.on_tab_changed)
-        main_layout.addWidget(self.tabs)
+        main_layout.addWidget(self.tabs, 1)
+
+        # Alt canlı günlük paneli: tüm sayfalarda görünür, durumu ayarlarda saklanır.
+        self.log_panel = LogPanel()
+        self.log_panel.closed.connect(self.hide_log_panel)
+        main_layout.addWidget(self.log_panel)
+        self.log_panel.setVisible(
+            load_settings().get("log_panel_visible", False))
+
+    def change_theme_mode(self, mode):
+        """Tema modunu kaydeder ve anında uygular."""
+        if mode not in ("system", "dark", "light"):
+            return
+        data = load_settings()
+        data["theme"] = mode
+        save_settings(data)
+        app = QApplication.instance()
+        if app is not None:
+            theme.apply_theme(app, mode)
 
     def populate_profile_combo(self):
         self.combo_profiles.blockSignals(True)
@@ -293,9 +420,18 @@ class CoreMixin:
         if index < 0 or index >= len(self.all_profiles):
             return
         selected_p = self.all_profiles[index]
+        if selected_p.get("id") == self.profile_data.get("id"):
+            return
+        if not self.prepare_profile_change():
+            # Kullanıcı vazgeçti; birleşik kutuyu etkin profile geri al.
+            self.populate_profile_combo()
+            return
         self.profile_data = selected_p
         self.active_profile_id = selected_p.get("id")
         common.PANIC_KEY = selected_p.get("panicKey") or "KEY_PAUSE"
+        self.restart_key = common.normalize_restart_key(selected_p.get("restartKey"))
+        if getattr(self, "is_manually_stopped", False):
+            self.start_restart_watch()
         self.save_profile_to_disk(restart_daemon=True)
         self.refresh_macro_table()
         self.show_autosave_banner(T("'{}' aktif edildi. Diğer profiller devre dışıdır.").format(selected_p.get('name')))
@@ -357,10 +493,14 @@ class CoreMixin:
             QMessageBox.StandardButton.No)
         if answer != QMessageBox.StandardButton.Yes:
             return
+        if not self.prepare_profile_change():
+            return
         self.all_profiles = [p for p in self.all_profiles if p is not self.profile_data]
         self.profile_data = self.all_profiles[0]
         self.active_profile_id = self.profile_data.get("id", "")
         common.PANIC_KEY = self.profile_data.get("panicKey") or "KEY_PAUSE"
+        self.restart_key = common.normalize_restart_key(
+            self.profile_data.get("restartKey"))
         self.populate_profile_combo()
         self.save_profile_to_disk(restart_daemon=True)
         self.refresh_macro_table()
@@ -369,10 +509,13 @@ class CoreMixin:
     def create_new_profile_dialog(self):
         name, ok = QInputDialog.getText(self, T("Yeni Profil"), T("Yeni profil adını girin:"))
         if ok and name.strip():
+            if not self.prepare_profile_change():
+                return
             new_p = {
                 "id": f"profile-{int(time.time()*1000)}",
                 "name": name.strip(),
                 "panicKey": common.PANIC_KEY,
+                "restartKey": self.restart_key,
                 "virtualDeviceName": f"{name.strip()} Virtual Engine",
                 "defaultJitterMs": 2,
                 "macros": []
@@ -422,6 +565,23 @@ class CoreMixin:
             return True
         return answer != QMessageBox.StandardButton.Cancel
 
+    def prepare_profile_change(self):
+        """Profil değişmeden önce kaydedilmemiş düzenleyici hâlini sorar.
+
+        İptalde ``False`` döner ve çağıran işlem yapılmaz. Onayda düzenleyici
+        kapatılır; aksi hâlde eski profile ait değerler yeni profile
+        kaydedilebilirdi.
+        """
+        if not self.confirm_discard_editor_changes():
+            return False
+        self._editor_snapshot = None
+        if getattr(self, "_editor_active", False):
+            self._editor_active = False
+            self.tabs.blockSignals(True)
+            self.tabs.setCurrentIndex(0)
+            self.tabs.blockSignals(False)
+        return True
+
     def on_tab_changed(self, index):
         if index != 1 and getattr(self, "_editor_active", False):
             if not self.confirm_discard_editor_changes():
@@ -437,7 +597,7 @@ class CoreMixin:
             if self.is_daemon_running() and not getattr(self, "is_manually_stopped", False):
                 self.was_editor_daemon_running = True
                 self.stop_daemon()
-                self.show_autosave_banner(T("🛑 Düzenleme modu: Metin yazarken ve ayar yaparken makrolar durduruldu."))
+                self.show_autosave_banner(T("Düzenleme modu: Metin yazarken ve ayar yaparken makrolar durduruldu."))
 
             row = self.macro_table.currentRow()
             if 0 <= row < len(self.profile_data.get("macros", [])):
@@ -450,18 +610,74 @@ class CoreMixin:
                 self.was_editor_daemon_running = False
                 if not getattr(self, "is_manually_stopped", False):
                     self.restart_daemon(show_message=False)
-                    self.show_autosave_banner(T("▶ Makro motoru tekrar aktif edildi."))
+                    self.show_autosave_banner(T("Makro motoru tekrar aktif edildi."))
 
     def configure_panic_key(self):
         dialog = KeyCaptureDialog(self)
-        dialog.setWindowTitle(T("⚙️ STOP Tuşunu Ayarlayın"))
+        dialog.setWindowTitle(T("STOP Tuşunu Ayarlayın"))
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.captured_key:
             common.PANIC_KEY = dialog.captured_key
             self.profile_data["panicKey"] = common.PANIC_KEY
             self.show_autosave_banner(T("STOP tuşu '{}' olarak güncellendi.").format(common.PANIC_KEY))
             self.save_profile_to_disk(restart_daemon=True)
 
+    def configure_restart_key(self):
+        dialog = KeyCaptureDialog(self)
+        dialog.setWindowTitle(T("Yeniden Başlatma Tuşunu Ayarlayın"))
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.captured_key:
+            return
+        key = common.normalize_restart_key(dialog.captured_key)
+        if key != dialog.captured_key.strip().upper():
+            QMessageBox.warning(
+                self, T("Geçersiz Tuş"),
+                T("Yeniden başlatma tuşu bir klavye tuşu olmalıdır (ör. KEY_F12)."))
+            return
+        self.restart_key = key
+        self.profile_data["restartKey"] = key
+        self.show_autosave_banner(
+            T("Yeniden başlatma tuşu '{}' olarak güncellendi.").format(key))
+        self.save_profile_to_disk(restart_daemon=False)
+        if getattr(self, "is_manually_stopped", False):
+            self.start_restart_watch()
+
+    def maybe_run_onboarding(self):
+        """Yalnızca ilk açılışta sihirbazı gösterir."""
+        if not getattr(self, "_onboarding_pending", False):
+            return
+        self._onboarding_pending = False
+        if not self.run_onboarding_wizard():
+            # İptal edilirse mevcut otomatik motor başlatma davranışı korunur.
+            self.check_and_auto_start_daemon()
+
+    def run_onboarding_wizard(self):
+        """Kurulum sihirbazını açar; kabul edildiyse True döndürür."""
+        from .onboarding import OnboardingWizard
+
+        wizard = OnboardingWizard(self)
+        accepted = wizard.exec() == QDialog.DialogCode.Accepted
+        if (accepted and wizard.start_engine_requested()
+                and not self.is_manually_stopped and not self.is_daemon_running()):
+            self.restart_daemon(show_message=False)
+        self.update_daemon_status()
+        return accepted
+
+    def show_log_panel(self):
+        """Günlük panelini açar; tercih `settings.json`'a yazılır."""
+        self.log_panel.show()
+        self.log_panel.refresh_now()
+        self._save_log_panel_visibility(True)
+
+    def hide_log_panel(self):
+        self.log_panel.hide()
+        self._save_log_panel_visibility(False)
+
+    def _save_log_panel_visibility(self, visible):
+        data = load_settings()
+        if data.get("log_panel_visible") != visible:
+            data["log_panel_visible"] = visible
+            save_settings(data)
+
     def show_autosave_banner(self, text):
-        self.statusBar().showMessage(f"💾 {text}", 3000)
+        self.statusBar().showMessage(f"{text}", 3000)
 
     # SEKME 1: Makrolar

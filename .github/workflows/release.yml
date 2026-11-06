@@ -15,9 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Bağımlılıklar
-        run: sudo apt-get update && sudo apt-get install -y libevdev-dev pkg-config
-
       - name: Rust araç zinciri
         uses: dtolnay/rust-toolchain@stable
 
@@ -29,13 +26,24 @@ jobs:
           set -euo pipefail
           NAME="macrostat-${GITHUB_REF_NAME}-linux-x86_64"
           mkdir -p "dist/$NAME"
-          cp target/release/cachymacro-daemon "dist/$NAME/"
+          cp target/release/macrostat-daemon "dist/$NAME/"
           cp gui.py "dist/$NAME/"
           cp -r macrostat "dist/$NAME/"
           find "dist/$NAME/macrostat" -name '__pycache__' -type d -prune -exec rm -rf {} +
           cp -r assets "dist/$NAME/"
-          cp baslat-arayuz.sh install_all.sh README.md LICENSE THIRD_PARTY.md requirements.txt "dist/$NAME/"
-          chmod +x "dist/$NAME/cachymacro-daemon" "dist/$NAME/baslat-arayuz.sh" "dist/$NAME/install_all.sh"
+          cp -r packaging "dist/$NAME/"
+          cp -r src "dist/$NAME/"
+          # `src/kwin_input.rs` derleme zamanında wayland-scanner ile bu
+          # dosyayı okur; arşivden yeniden derleme için şart.
+          cp -r protocols "dist/$NAME/"
+          cp Cargo.toml Cargo.lock PKGBUILD "dist/$NAME/"
+          cp start-macrostat.sh install_all.sh install_arch.sh install_ubuntu.sh \
+            install_debian.sh install_fedora.sh uninstall.sh README.md \
+            LICENSE THIRD_PARTY.md SECURITY.md \
+            requirements.txt "dist/$NAME/"
+          chmod +x "dist/$NAME/macrostat-daemon" "dist/$NAME/start-macrostat.sh" \
+            "dist/$NAME/install_all.sh" "dist/$NAME"/install_*.sh \
+            "dist/$NAME/uninstall.sh" "dist/$NAME/packaging/install-common.sh"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
           sha256sum "dist/$NAME.tar.gz" > "dist/$NAME.tar.gz.sha256"
 
@@ -56,5 +64,3 @@ jobs:
             dist/*.tar.gz
             dist/*.sha256
           generate_release_notes: true
-
-  # AppImage işi, GUI çalışması tamamlandıktan sonra build_appimage.sh ile eklenecek.

@@ -1,6 +1,6 @@
 # Maintainer: MacroStat contributors
-# Yerel paket: repo kökündeki PKGBUILD ile `makepkg -si` çalıştırılır.
-# GitHub yayını sonrası AUR için `source=()` yerine sürüm tarball'ı kullanılmalıdır.
+# Local package: run `makepkg -si` from the repository root.
+# For AUR after the GitHub release, replace `source=()` with the release tarball.
 pkgname=macrostat
 pkgver=1.0.0
 pkgrel=1
@@ -8,12 +8,12 @@ pkgdesc="Low-latency Linux macro engine (evdev/uinput) with a PyQt6 interface"
 arch=('x86_64')
 url="https://github.com/ensargtz/Macro-Stat"
 license=('GPL-3.0-or-later')
-depends=('python' 'python-pyqt6' 'libevdev')
-makedepends=('rust' 'cargo' 'pkgconf')
+depends=('python' 'python-pyqt6')
+makedepends=('rust' 'cargo')
 source=()
 sha256sums=()
 
-# Depo kökündeki src/ (Rust kaynağı) ile çakışmaması için ayrı çalışma dizini.
+# Separate build directory so it does not clash with src/ (Rust source) in the repo root.
 BUILDDIR="$startdir/.makepkg"
 
 build() {
@@ -24,8 +24,8 @@ build() {
 package() {
     cd "$startdir"
 
-    install -Dm755 target/release/cachymacro-daemon \
-        "$pkgdir/usr/bin/cachymacro-daemon"
+    install -Dm755 target/release/macrostat-daemon \
+        "$pkgdir/usr/bin/macrostat-daemon"
     install -Dm755 packaging/macrostat "$pkgdir/usr/bin/macrostat"
 
     install -Dm644 gui.py "$pkgdir/usr/lib/macrostat/gui.py"
@@ -37,6 +37,6 @@ package() {
         "$pkgdir/usr/share/icons/hicolor/scalable/apps/macrostat.svg"
     install -Dm644 packaging/macrostat.desktop \
         "$pkgdir/usr/share/applications/macrostat.desktop"
-    install -Dm644 packaging/99-cachymacro.rules \
-        "$pkgdir/usr/lib/udev/rules.d/99-cachymacro.rules"
+    install -Dm644 packaging/99-macrostat.rules \
+        "$pkgdir/usr/lib/udev/rules.d/99-macrostat.rules"
 }

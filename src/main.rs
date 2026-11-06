@@ -18,6 +18,19 @@ use evdev::{AttributeSet, EventType, InputEvent, Key, RelativeAxisType};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+mod kwin_input;
+
+/// Kayıt/oynatma güvenlik sınırları: tek makroda en fazla 200 bin nokta,
+/// iki nokta arasında en fazla 10 dakika beklenir.
+const MAX_MOUSE_PATH_POINTS: usize = 200_000;
+const MAX_MOUSE_PATH_STEP_MS: i64 = 600_000;
+/// Göreli fare olayları bu aralıkta birleştirilir (yaklaşık 250 Hz).
+const MOUSE_RECORD_SAMPLE_MS: u64 = 4;
+const MOUSE_RECORD_MAX_SECS: u64 = 600;
+/// `--watch-restart` modunda yeniden başlatma tuşuna basılınca dönen kod.
+/// Arayüz bu kodu görünce motoru yeniden başlatır.
+const WATCH_RESTART_EXIT_CODE: i32 = 42;
+
 static PANIC_STOP: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// GUI kaydettiğinde motoru yeniden başlatmadan profili tazelemek için.
@@ -25,6 +38,147 @@ static RELOAD: AtomicBool = AtomicBool::new(false);
 /// Aynı anda birden fazla makro thread'inin sanal tuş durumunu birbirine
 /// karıştırmasını önlemek için tek yürütme kilidi.
 static ACTION_LOCK: Mutex<()> = Mutex::new(());
+
+/// X11 oturumunda gerçek imleç konumunu okumak ve imleci bir noktaya taşımak
+/// için libX11'i çalışma anında yükler. Wayland oturumunda XWayland imlecin
+/// gerçek ekran konumunu güvenilir biçimde bildirmediğinden bu yol kullanılmaz;
+/// orada kayıt göreli hareketle, oynatma da imlecin o anki konumundan başlar.
+mod x11 {
+    use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
+    use std::sync::OnceLock;
+
+    type OpenDisplay = unsafe extern "C" fn(*const c_char) -> *mut c_void;
+    type CloseDisplay = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type DefaultRootWindow = unsafe extern "C" fn(*mut c_void) -> c_ulong;
+    type QueryPointer = unsafe extern "C" fn(
+        *mut c_void,
+        c_ulong,
+        *mut c_ulong,
+        *mut c_ulong,
+        *mut c_int,
+        *mut c_int,
+        *mut c_int,
+        *mut c_int,
+        *mut c_uint,
+    ) -> c_int;
+    type WarpPointer = unsafe extern "C" fn(
+        *mut c_void,
+        c_ulong,
+        c_ulong,
+        c_int,
+        c_int,
+        c_uint,
+        c_uint,
+        c_int,
+        c_int,
+    ) -> c_int;
+    type Flush = unsafe extern "C" fn(*mut c_void) -> c_int;
+
+    struct Api {
+        open: OpenDisplay,
+        close: CloseDisplay,
+        root: DefaultRootWindow,
+        query: QueryPointer,
+        warp: WarpPointer,
+        flush: Flush,
+    }
+
+    unsafe fn symbol<T: Copy>(handle: *mut c_void, name: &[u8]) -> Option<T> {
+        debug_assert_eq!(std::mem::size_of::<T>(), std::mem::size_of::<*mut c_void>());
+        let ptr = unsafe { libc::dlsym(handle, name.as_ptr().cast()) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { std::mem::transmute_copy(&ptr) })
+        }
+    }
+
+    unsafe fn load() -> Option<Api> {
+        // C-string değişmezi (Rust 1.77) yerine bayt dizisi: Ubuntu 24.04'ün
+        // rustc 1.75'i ile de derlenebilsin.
+        let handle = unsafe { libc::dlopen(b"libX11.so.6\0".as_ptr().cast(), libc::RTLD_LAZY) };
+        if handle.is_null() {
+            return None;
+        }
+        Some(Api {
+            open: unsafe { symbol(handle, b"XOpenDisplay\0") }?,
+            close: unsafe { symbol(handle, b"XCloseDisplay\0") }?,
+            root: unsafe { symbol(handle, b"XDefaultRootWindow\0") }?,
+            query: unsafe { symbol(handle, b"XQueryPointer\0") }?,
+            warp: unsafe { symbol(handle, b"XWarpPointer\0") }?,
+            flush: unsafe { symbol(handle, b"XFlush\0") }?,
+        })
+    }
+
+    fn api() -> Option<&'static Api> {
+        static API: OnceLock<Option<Api>> = OnceLock::new();
+        API.get_or_init(|| unsafe { load() }).as_ref()
+    }
+
+    /// Gerçek bir X11 oturumunda mıyız? Wayland'da (XWayland açık olsa bile)
+    /// konum sorgusu güvenilir değildir, bu yüzden kapalı tutulur.
+    pub fn available() -> bool {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            return false;
+        }
+        if std::env::var("XDG_SESSION_TYPE")
+            .is_ok_and(|value| value.eq_ignore_ascii_case("wayland"))
+        {
+            return false;
+        }
+        std::env::var_os("DISPLAY").is_some()
+    }
+
+    fn with_display<T>(f: impl FnOnce(&Api, *mut c_void) -> T) -> Option<T> {
+        if !available() {
+            return None;
+        }
+        let api = api()?;
+        let display = unsafe { (api.open)(std::ptr::null()) };
+        if display.is_null() {
+            return None;
+        }
+        let result = f(api, display);
+        unsafe {
+            (api.close)(display);
+        }
+        Some(result)
+    }
+
+    /// İmlecin kök penceredeki (ekran) konumu.
+    pub fn pointer_position() -> Option<(i32, i32)> {
+        with_display(|api, display| unsafe {
+            let root = (api.root)(display);
+            let (mut root_ret, mut child_ret) = (0, 0);
+            let (mut root_x, mut root_y, mut win_x, mut win_y) = (0, 0, 0, 0);
+            let mut mask = 0;
+            let ok = (api.query)(
+                display,
+                root,
+                &mut root_ret,
+                &mut child_ret,
+                &mut root_x,
+                &mut root_y,
+                &mut win_x,
+                &mut win_y,
+                &mut mask,
+            );
+            (ok != 0).then_some((root_x, root_y))
+        })
+        .flatten()
+    }
+
+    /// İmleci ekran koordinatına taşır. Yalnızca gerçek X11 oturumunda çalışır.
+    pub fn warp_pointer(x: i32, y: i32) -> bool {
+        with_display(|api, display| unsafe {
+            let root = (api.root)(display);
+            let ok = (api.warp)(display, 0, root, 0, 0, 0, 0, x, y);
+            (api.flush)(display);
+            ok != 0
+        })
+        .unwrap_or(false)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -80,6 +234,13 @@ pub enum ActionType {
         alias = "mouseScroll"
     )]
     MOUSE_SCROLL,
+    #[serde(
+        alias = "mouse_path",
+        alias = "MOUSE_PATH",
+        alias = "MousePath",
+        alias = "mousePath"
+    )]
+    MOUSE_PATH,
     #[serde(alias = "text", alias = "TEXT", alias = "Text")]
     TEXT,
     #[serde(alias = "delay", alias = "DELAY", alias = "Delay")]
@@ -103,6 +264,15 @@ pub struct MacroAction {
     pub dy: Option<i32>,
     #[serde(rename = "scrollDelta", alias = "scroll_delta", default)]
     pub scroll_delta: Option<i32>,
+    /// MOUSE_PATH: [geçen_ms, dx, dy] üçlüleri. Süre bir önceki noktadan
+    /// bu yana geçen zamandır; ilk nokta kayıt başlangıcından itibaren bekler.
+    #[serde(default)]
+    pub points: Option<Vec<[i64; 3]>>,
+    /// MOUSE_PATH: kaydın başladığı andaki imleç konumu [x, y]. Yalnızca
+    /// konumu okunabilen oturumlarda (X11) bulunur; varsa oynatma başında
+    /// imleç buraya taşınır.
+    #[serde(default)]
+    pub start: Option<[i32; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +342,17 @@ fn default_double_tap_timeout() -> u64 {
 }
 fn default_hold_duration() -> u64 {
     300
+}
+
+/// Kilit zehirlenmiş olsa bile içeriğe erişir.
+///
+/// Motor tek süreçte çalışır; bir iş parçacığının paniği tüm motoru
+/// düşürmemeli. `lock().unwrap()` kilidi zehirleyen bir panikten sonra
+/// süreci de sonlandırırdı.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -469,7 +650,7 @@ fn char_to_evdev_key(c: char) -> Option<(Key, bool)> {
 fn warn_unsupported_char(c: char) {
     static WARNED: OnceLock<Mutex<HashSet<char>>> = OnceLock::new();
     let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
-    if warned.lock().unwrap().insert(c) {
+    if lock(warned).insert(c) {
         eprintln!(
             "[UYARI] '{}' karakteri TEXT eyleminde desteklenmiyor (yalnızca US-ASCII); atlandı.",
             c
@@ -477,12 +658,23 @@ fn warn_unsupported_char(c: char) {
     }
 }
 
-fn create_virtual_device(name: &str) -> VirtualDevice {
-    let dev_name = if name.is_empty() {
-        "MacroStat Virtual Engine"
+/// Profilden gelen sanal aygıt adını güvenli biçime indirger.
+///
+/// NUL ve diğer denetim karakterleri `uinput` adında anlamsızdır; ayrıca
+/// ad, hata ayıklama çıktısı ve bildirimlerde görünür. Boş sonuç varsayılana döner.
+fn sanitize_device_name(name: &str) -> String {
+    let cleaned: String = name.chars().filter(|c| !c.is_control()).collect();
+    let trimmed = cleaned.trim();
+    let limited: String = trimmed.chars().take(80).collect();
+    if limited.is_empty() {
+        "MacroStat Virtual Engine".to_string()
     } else {
-        name
-    };
+        limited
+    }
+}
+
+fn create_virtual_device(name: &str) -> VirtualDevice {
+    let dev_name = sanitize_device_name(name);
     let mut keys = AttributeSet::<Key>::new();
 
     // Standart masaüstü klavye tuşları (1 - 248): A-Z, 0-9, F1-F24, Modifiyeler, Yön ve Numpad
@@ -510,7 +702,7 @@ fn create_virtual_device(name: &str) -> VirtualDevice {
 
     for _ in 0..5 {
         if let Ok(builder) = VirtualDeviceBuilder::new() {
-            if let Ok(b2) = builder.name(dev_name).with_keys(&keys) {
+            if let Ok(b2) = builder.name(&dev_name).with_keys(&keys) {
                 if let Ok(b3) = b2.with_relative_axes(&rel_axes) {
                     if let Ok(dev) = b3.build() {
                         return dev;
@@ -523,7 +715,7 @@ fn create_virtual_device(name: &str) -> VirtualDevice {
 
     VirtualDeviceBuilder::new()
         .unwrap()
-        .name(dev_name)
+        .name(&dev_name)
         .with_keys(&keys)
         .unwrap()
         .with_relative_axes(&rel_axes)
@@ -588,14 +780,14 @@ fn execute_macro_actions(
     for action in actions {
         if PANIC_STOP.load(Ordering::SeqCst) || stop_flag.is_some_and(|f| !f.load(Ordering::SeqCst))
         {
-            let mut dev = vdev.lock().unwrap();
-            let mut pressed = pressed_keys.lock().unwrap();
+            let mut dev = lock(vdev);
+            let mut pressed = lock(pressed_keys);
             release_all_keys(&mut dev, &mut pressed);
             return false;
         }
 
-        let mut dev = vdev.lock().unwrap();
-        let mut pressed = pressed_keys.lock().unwrap();
+        let mut dev = lock(vdev);
+        let mut pressed = lock(pressed_keys);
 
         match &action.r#type {
             ActionType::KEY_DOWN => {
@@ -626,20 +818,20 @@ fn execute_macro_actions(
                         drop(pressed);
                         let tap_ms = action.delay_ms.unwrap_or(25).max(10);
                         if !cancellable_sleep(tap_ms, 0, stop_flag) {
-                            let mut d = vdev.lock().unwrap();
-                            let mut p = pressed_keys.lock().unwrap();
+                            let mut d = lock(vdev);
+                            let mut p = lock(pressed_keys);
                             release_all_keys(&mut d, &mut p);
                             return false;
                         }
-                        let mut dev2 = vdev.lock().unwrap();
-                        let mut pressed2 = pressed_keys.lock().unwrap();
+                        let mut dev2 = lock(vdev);
+                        let mut pressed2 = lock(pressed_keys);
                         emit_key(&mut dev2, key, 0);
                         pressed2.remove(&key);
                         drop(dev2);
                         drop(pressed2);
                         if !cancellable_sleep(10, 0, stop_flag) {
-                            let mut d = vdev.lock().unwrap();
-                            let mut p = pressed_keys.lock().unwrap();
+                            let mut d = lock(vdev);
+                            let mut p = lock(pressed_keys);
                             release_all_keys(&mut d, &mut p);
                             return false;
                         }
@@ -675,20 +867,20 @@ fn execute_macro_actions(
                         drop(pressed);
                         let click_ms = action.delay_ms.unwrap_or(20).max(10);
                         if !cancellable_sleep(click_ms, 0, stop_flag) {
-                            let mut d = vdev.lock().unwrap();
-                            let mut p = pressed_keys.lock().unwrap();
+                            let mut d = lock(vdev);
+                            let mut p = lock(pressed_keys);
                             release_all_keys(&mut d, &mut p);
                             return false;
                         }
-                        let mut dev2 = vdev.lock().unwrap();
-                        let mut pressed2 = pressed_keys.lock().unwrap();
+                        let mut dev2 = lock(vdev);
+                        let mut pressed2 = lock(pressed_keys);
                         emit_key(&mut dev2, btn, 0);
                         pressed2.remove(&btn);
                         drop(dev2);
                         drop(pressed2);
                         if !cancellable_sleep(10, 0, stop_flag) {
-                            let mut d = vdev.lock().unwrap();
-                            let mut p = pressed_keys.lock().unwrap();
+                            let mut d = lock(vdev);
+                            let mut p = lock(pressed_keys);
                             release_all_keys(&mut d, &mut p);
                             return false;
                         }
@@ -705,6 +897,50 @@ fn execute_macro_actions(
                     InputEvent::new(EventType::SYNCHRONIZATION, 0, 0),
                 ]);
             }
+            ActionType::MOUSE_PATH => {
+                let points = action.points.clone().unwrap_or_default();
+                drop(dev);
+                drop(pressed);
+                let cancelled = PANIC_STOP.load(Ordering::SeqCst)
+                    || stop_flag.is_some_and(|f| !f.load(Ordering::SeqCst));
+                if cancelled {
+                    let mut d = lock(vdev);
+                    let mut p = lock(pressed_keys);
+                    release_all_keys(&mut d, &mut p);
+                    return false;
+                }
+                // Kayıt sırasında başlangıç noktası alındıysa imleci oraya taşı;
+                // böylece göreli yol ekranda kayıttakiyle aynı yerde başlar.
+                if let Some([x, y]) = action.start {
+                    let x = x.clamp(-1_000_000, 1_000_000);
+                    let y = y.clamp(-1_000_000, 1_000_000);
+                    let moved = x11::warp_pointer(x, y) || kwin_input::move_pointer_absolute(x, y);
+                    if moved {
+                        println!("[MOUSE_PATH] İmleç başlangıç noktasına taşındı: ({x}, {y})");
+                    }
+                }
+                for point in points.into_iter().take(MAX_MOUSE_PATH_POINTS) {
+                    let dt = point[0].clamp(0, MAX_MOUSE_PATH_STEP_MS) as u64;
+                    let dx = point[1].clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                    let dy = point[2].clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                    if !cancellable_sleep(dt, 0, stop_flag) {
+                        let mut d = lock(vdev);
+                        let mut p = lock(pressed_keys);
+                        release_all_keys(&mut d, &mut p);
+                        return false;
+                    }
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let mut dev_m = lock(vdev);
+                    let _ = dev_m.emit(&[
+                        InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_X.0, dx),
+                        InputEvent::new(EventType::RELATIVE, RelativeAxisType::REL_Y.0, dy),
+                        InputEvent::new(EventType::SYNCHRONIZATION, 0, 0),
+                    ]);
+                }
+                continue;
+            }
             ActionType::MOUSE_SCROLL => {
                 let delta = action.scroll_delta.unwrap_or(0);
                 let _ = dev.emit(&[
@@ -720,52 +956,52 @@ fn execute_macro_actions(
                         if PANIC_STOP.load(Ordering::SeqCst)
                             || stop_flag.is_some_and(|f| !f.load(Ordering::SeqCst))
                         {
-                            let mut d = vdev.lock().unwrap();
-                            let mut p = pressed_keys.lock().unwrap();
+                            let mut d = lock(vdev);
+                            let mut p = lock(pressed_keys);
                             release_all_keys(&mut d, &mut p);
                             return false;
                         }
                         if let Some((key, with_shift)) = char_to_evdev_key(ch) {
-                            let mut dev_c = vdev.lock().unwrap();
+                            let mut dev_c = lock(vdev);
                             if with_shift {
                                 emit_key(&mut dev_c, Key::KEY_LEFTSHIFT, 1);
                                 // İzlenen sete eklenmezse iptal/STOP anında Shift takılı kalır.
-                                pressed_keys.lock().unwrap().insert(Key::KEY_LEFTSHIFT);
+                                lock(pressed_keys).insert(Key::KEY_LEFTSHIFT);
                                 drop(dev_c);
                                 if !cancellable_sleep(8, 0, stop_flag) {
-                                    let mut d = vdev.lock().unwrap();
-                                    let mut p = pressed_keys.lock().unwrap();
+                                    let mut d = lock(vdev);
+                                    let mut p = lock(pressed_keys);
                                     release_all_keys(&mut d, &mut p);
                                     return false;
                                 }
-                                dev_c = vdev.lock().unwrap();
+                                dev_c = lock(vdev);
                             }
                             emit_key(&mut dev_c, key, 1);
                             drop(dev_c);
                             if !cancellable_sleep(16, 0, stop_flag) {
-                                let mut d = vdev.lock().unwrap();
-                                let mut p = pressed_keys.lock().unwrap();
+                                let mut d = lock(vdev);
+                                let mut p = lock(pressed_keys);
                                 release_all_keys(&mut d, &mut p);
                                 return false;
                             }
-                            let mut dev_c2 = vdev.lock().unwrap();
+                            let mut dev_c2 = lock(vdev);
                             emit_key(&mut dev_c2, key, 0);
                             if with_shift {
                                 drop(dev_c2);
                                 if !cancellable_sleep(8, 0, stop_flag) {
-                                    let mut d = vdev.lock().unwrap();
-                                    let mut p = pressed_keys.lock().unwrap();
+                                    let mut d = lock(vdev);
+                                    let mut p = lock(pressed_keys);
                                     release_all_keys(&mut d, &mut p);
                                     return false;
                                 }
-                                dev_c2 = vdev.lock().unwrap();
+                                dev_c2 = lock(vdev);
                                 emit_key(&mut dev_c2, Key::KEY_LEFTSHIFT, 0);
-                                pressed_keys.lock().unwrap().remove(&Key::KEY_LEFTSHIFT);
+                                lock(pressed_keys).remove(&Key::KEY_LEFTSHIFT);
                             }
                             drop(dev_c2);
                             if !cancellable_sleep(16, 0, stop_flag) {
-                                let mut d = vdev.lock().unwrap();
-                                let mut p = pressed_keys.lock().unwrap();
+                                let mut d = lock(vdev);
+                                let mut p = lock(pressed_keys);
                                 release_all_keys(&mut d, &mut p);
                                 return false;
                             }
@@ -782,8 +1018,8 @@ fn execute_macro_actions(
                 drop(dev);
                 drop(pressed);
                 if !cancellable_sleep(ms, jitter, stop_flag) {
-                    let mut d = vdev.lock().unwrap();
-                    let mut p = pressed_keys.lock().unwrap();
+                    let mut d = lock(vdev);
+                    let mut p = lock(pressed_keys);
                     release_all_keys(&mut d, &mut p);
                     return false;
                 }
@@ -844,6 +1080,358 @@ fn discover_devices(verbose: bool) -> (Vec<evdev::Device>, usize) {
         }
     }
     (devices, permission_denied)
+}
+
+/// Göreli X/Y ekseni sunan fiziksel işaretçi aygıtlarını bulur (fare, dokunmatik
+/// yüzey). Sanal MacroStat aygıtları kayda alınmaz; aksi hâlde geri besleme olur.
+fn discover_pointer_devices() -> (Vec<evdev::Device>, usize) {
+    let mut devices = Vec::new();
+    let mut permission_denied = 0;
+
+    if let Ok(entries) = fs::read_dir("/dev/input") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(file_name) = path.file_name().and_then(|f| f.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with("event") {
+                continue;
+            }
+            match evdev::Device::open(&path) {
+                Ok(dev) => {
+                    if let Some(name) = dev.name() {
+                        if name.contains("MacroStat")
+                            || name.contains("CachyMacro")
+                            || name.contains("Virtual Engine")
+                        {
+                            continue;
+                        }
+                    }
+                    let has_xy = dev.supported_relative_axes().is_some_and(|axes| {
+                        axes.contains(RelativeAxisType::REL_X)
+                            && axes.contains(RelativeAxisType::REL_Y)
+                    });
+                    if has_xy {
+                        println!(
+                            "[KAYIT] İşaretçi aygıtı: {} ({})",
+                            dev.name().unwrap_or("Giriş Aygıtı"),
+                            path.display()
+                        );
+                        devices.push(dev);
+                    }
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        permission_denied += 1;
+                    }
+                }
+            }
+        }
+    }
+    (devices, permission_denied)
+}
+
+#[derive(Serialize)]
+struct MousePathRecording {
+    version: u32,
+    sample_ms: u64,
+    duration_ms: u64,
+    points: Vec<[i64; 3]>,
+    /// (kayıt başından itibaren ms, "BTN_*", 1 = basıldı / 0 = bırakıldı)
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    buttons: Vec<(i64, String, i32)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start: Option<[i32; 2]>,
+}
+
+/// Kayda alınan fiziksel fare düğmesi kodunu motor adına çevirir.
+fn mouse_button_name(code: u16) -> Option<&'static str> {
+    match code {
+        c if c == Key::BTN_LEFT.0 => Some("BTN_LEFT"),
+        c if c == Key::BTN_RIGHT.0 => Some("BTN_RIGHT"),
+        c if c == Key::BTN_MIDDLE.0 => Some("BTN_MIDDLE"),
+        c if c == Key::BTN_SIDE.0 => Some("BTN_SIDE"),
+        c if c == Key::BTN_EXTRA.0 => Some("BTN_EXTRA"),
+        _ => None,
+    }
+}
+
+fn write_mouse_recording(path: &Path, recording: &MousePathRecording) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let data = serde_json::to_vec(recording)?;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// `--record-mouse <dosya>`: sistem genelindeki göreli fare hareketini kaydeder.
+/// Kilit ve uinput kullanmaz; yalnızca /dev/input okur. STOP tuşu, SIGTERM veya
+/// sınırlar dolduğunda birleştirilmiş yolu atomik olarak yazar.
+fn run_record_mouse(
+    output: &Path,
+    panic_key: Key,
+    panic_key_name: &str,
+    start_override: Option<[i32; 2]>,
+) -> i32 {
+    // X11'de kaydın başladığı imleç konumu okunabilir; oynatma bu noktaya
+    // hizalanır. Wayland'da konum arayüz tarafından KWin betiğiyle okunup
+    // `start_override` olarak verilir; okunamadıysa alan yazılmaz.
+    let start = start_override.or_else(|| x11::pointer_position().map(|(x, y)| [x, y]));
+    let (mut devices, permission_denied) = discover_pointer_devices();
+    if devices.is_empty() {
+        if permission_denied > 0 {
+            eprintln!("[HATA: İZİN GEREKLİ] /dev/input/event* aygıtlarına okuma izni verilemedi.");
+        } else {
+            eprintln!("[HATA] Göreli X/Y ekseni sunan işaretçi aygıtı bulunamadı.");
+        }
+        return 2;
+    }
+
+    let mut poll_fds: Vec<libc::pollfd> = devices
+        .iter()
+        .map(|d| libc::pollfd {
+            fd: d.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+
+    println!(
+        "[KAYIT] Fare hareketi kaydediliyor; durdurmak için {} veya arayüzdeki düğme.",
+        panic_key_name
+    );
+    println!("[KAYIT] Çıktı: {}", output.display());
+    if let Some([x, y]) = start {
+        println!("[KAYIT] Başlangıç imleç konumu: ({x}, {y})");
+    }
+
+    let started = Instant::now();
+    let mut last_emit = started;
+    let mut acc_dx: i64 = 0;
+    let mut acc_dy: i64 = 0;
+    let mut points: Vec<[i64; 3]> = Vec::new();
+    let mut buttons: Vec<(i64, String, i32)> = Vec::new();
+    let mut interrupted = false;
+
+    loop {
+        if SHUTDOWN.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let ret = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as libc::nfds_t, 20) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            thread::sleep(Duration::from_millis(20));
+        } else if ret > 0 {
+            // Aygıt kaybolursa poll sürekli hata döndürür; POLLIN yoksa
+            // döngüyü bırakıp kaydı bitir (aksi hâlde CPU meşgul döner).
+            if poll_fds.iter().all(|pfd| pfd.revents & libc::POLLIN == 0) {
+                break;
+            }
+            for (i, pfd) in poll_fds.iter().enumerate() {
+                if pfd.revents & libc::POLLIN == 0 {
+                    continue;
+                }
+                if let Ok(events) = devices[i].fetch_events() {
+                    for ev in events {
+                        match ev.event_type() {
+                            EventType::RELATIVE => {
+                                if ev.code() == RelativeAxisType::REL_X.0 {
+                                    acc_dx += i64::from(ev.value());
+                                } else if ev.code() == RelativeAxisType::REL_Y.0 {
+                                    acc_dy += i64::from(ev.value());
+                                }
+                            }
+                            EventType::KEY if ev.value() == 1 && ev.code() == panic_key.0 => {
+                                println!("[KAYIT] STOP tuşuna basıldı; kayıt bitiriliyor.");
+                                interrupted = true;
+                            }
+                            EventType::KEY if ev.value() == 0 || ev.value() == 1 => {
+                                if let Some(name) = mouse_button_name(ev.code()) {
+                                    buttons.push((
+                                        started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                                        name.to_string(),
+                                        ev.value(),
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        if interrupted {
+            break;
+        }
+
+        // Olayları 4 ms'lik dilimlerde birleştir; duruş boşlukları dt olarak korunur.
+        let elapsed = last_emit.elapsed();
+        if elapsed >= Duration::from_millis(MOUSE_RECORD_SAMPLE_MS) && (acc_dx != 0 || acc_dy != 0)
+        {
+            points.push([
+                elapsed.as_millis().min(i64::MAX as u128) as i64,
+                acc_dx.clamp(i32::MIN as i64, i32::MAX as i64),
+                acc_dy.clamp(i32::MIN as i64, i32::MAX as i64),
+            ]);
+            acc_dx = 0;
+            acc_dy = 0;
+            last_emit = Instant::now();
+        }
+
+        if points.len() >= MAX_MOUSE_PATH_POINTS {
+            eprintln!(
+                "[KAYIT] Nokta sınırına ulaşıldı ({}); kayıt bitiriliyor.",
+                MAX_MOUSE_PATH_POINTS
+            );
+            break;
+        }
+        if started.elapsed() >= Duration::from_secs(MOUSE_RECORD_MAX_SECS) {
+            eprintln!(
+                "[KAYIT] Süre sınırına ulaşıldı ({} sn); kayıt bitiriliyor.",
+                MOUSE_RECORD_MAX_SECS
+            );
+            break;
+        }
+    }
+
+    if acc_dx != 0 || acc_dy != 0 {
+        points.push([
+            last_emit.elapsed().as_millis().min(i64::MAX as u128) as i64,
+            acc_dx.clamp(i32::MIN as i64, i32::MAX as i64),
+            acc_dy.clamp(i32::MIN as i64, i32::MAX as i64),
+        ]);
+    }
+
+    let recording = MousePathRecording {
+        version: 1,
+        sample_ms: MOUSE_RECORD_SAMPLE_MS,
+        duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        points,
+        buttons,
+        start,
+    };
+    match write_mouse_recording(output, &recording) {
+        Ok(()) => {
+            println!(
+                "[KAYIT] {} nokta, {} ms kaydedildi → {}",
+                recording.points.len(),
+                recording.duration_ms,
+                output.display()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("[HATA] Kayıt yazılamadı ({}): {}", output.display(), e);
+            4
+        }
+    }
+}
+
+/// STOP sonrası arayüz bu süreci başlatır: yalnızca yeniden başlatma tuşunu
+/// dinler. Kilit ve uinput kullanmaz; tuşa basılınca `[RESTART]` yazıp özel
+/// çıkış koduyla sonlanır, böylece arayüz motoru yeniden başlatabilir.
+fn run_watch_restart(key: Key, key_name: &str) -> i32 {
+    let (mut devices, permission_denied) = discover_devices(false);
+    if devices.is_empty() {
+        if permission_denied > 0 {
+            eprintln!("[HATA: İZİN GEREKLİ] /dev/input/event* aygıtlarına okuma izni verilemedi.");
+        } else {
+            eprintln!("[HATA] Dinlenecek giriş aygıtı bulunamadı.");
+        }
+        return 2;
+    }
+
+    let mut poll_fds: Vec<libc::pollfd> = devices
+        .iter()
+        .map(|d| libc::pollfd {
+            fd: d.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+
+    println!("[BEKLE] STOP sonrası yeniden başlatma tuşu dinleniyor: {key_name}");
+
+    while !SHUTDOWN.load(Ordering::SeqCst) {
+        let ret = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as libc::nfds_t, 50) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        if ret == 0 {
+            continue;
+        }
+        // Tüm aygıtlar hata/askıda ise izleme sürdürülemez; temiz çık.
+        if poll_fds.iter().all(|pfd| pfd.revents & libc::POLLIN == 0) {
+            return 0;
+        }
+        for (i, pfd) in poll_fds.iter().enumerate() {
+            if pfd.revents & libc::POLLIN == 0 {
+                continue;
+            }
+            if let Ok(events) = devices[i].fetch_events() {
+                for ev in events {
+                    if ev.event_type() == EventType::KEY && ev.value() == 1 && ev.code() == key.0 {
+                        println!("[RESTART] {key_name} tuşuna basıldı.");
+                        return WATCH_RESTART_EXIT_CODE;
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Komut satırı seçenekleri; `main` yalnızca bu yapıya bakar.
+#[derive(Default)]
+struct CliArgs {
+    test_macro: Option<String>,
+    record_mouse: Option<String>,
+    panic_key: Option<String>,
+    start_x: Option<i32>,
+    start_y: Option<i32>,
+    watch_restart_key: Option<String>,
+    config: Option<String>,
+}
+
+fn parse_cli_args(raw: &[String]) -> CliArgs {
+    let mut parsed = CliArgs::default();
+    let mut args_iter = raw.iter().skip(1);
+    while let Some(arg) = args_iter.next() {
+        match arg.as_str() {
+            "--test-macro" => parsed.test_macro = args_iter.next().cloned(),
+            "--record-mouse" => parsed.record_mouse = args_iter.next().cloned(),
+            "--panic-key" => parsed.panic_key = args_iter.next().cloned(),
+            "--start-x" => parsed.start_x = args_iter.next().and_then(|v| v.parse().ok()),
+            "--start-y" => parsed.start_y = args_iter.next().and_then(|v| v.parse().ok()),
+            "--watch-restart" => parsed.watch_restart_key = args_iter.next().cloned(),
+            other if !other.starts_with("--") => parsed.config = Some(other.to_string()),
+            _ => {}
+        }
+    }
+    parsed
 }
 
 /// /dev/input dizinini inotify ile izler; başarısız olursa -1 döner.
@@ -908,13 +1496,26 @@ extern "C" fn handle_reload(_signal: libc::c_int) {
     RELOAD.store(true, Ordering::SeqCst);
 }
 
+/// Kilit dosyasının gerçekten bu kullanıcıya ait olduğunu doğrular.
+///
+/// Paylaşılan `/tmp` dizininde başka bir kullanıcı aynı adı önceden
+/// oluşturabilir; böyle bir dosya kilit olarak kullanılmaz.
+fn lock_file_owned_by(file: &fs::File, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata()
+        .map(|meta| meta.uid() == uid)
+        .unwrap_or(false)
+}
+
 /// Aynı kullanıcı için ikinci bir motorun başlamasını engeller.
 /// Kilit süreç yaşadığı sürece tutulur; süreç ölünce kernel kilidi bırakır.
 fn acquire_single_instance_lock() -> Option<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
     let uid = unsafe { libc::getuid() };
     let candidates = [
-        format!("/run/user/{}/cachymacro.lock", uid),
-        format!("/tmp/cachymacro-{}.lock", uid),
+        format!("/run/user/{}/macrostat.lock", uid),
+        format!("/tmp/macrostat-{}.lock", uid),
     ];
     for path in candidates {
         match fs::OpenOptions::new()
@@ -922,9 +1523,18 @@ fn acquire_single_instance_lock() -> Option<fs::File> {
             .truncate(false)
             .read(true)
             .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&path)
         {
             Ok(file) => {
+                if !lock_file_owned_by(&file, uid) {
+                    eprintln!(
+                        "[UYARI] Kilit dosyası bu kullanıcıya ait değil ({}), atlandı.",
+                        path
+                    );
+                    continue;
+                }
                 let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
                 if rc == 0 {
                     return Some(file);
@@ -1083,13 +1693,40 @@ fn trigger_matches(m: &CompiledMacro, key: Key, is_press: bool, held: &HashSet<K
     }
 }
 
+/// Profil dosyası için üst sınır. Elle düzenlenen ya da bozulmuş bir dosyanın
+/// belleği tüketmesini engeller; gerçek profiller birkaç yüz kilobayttır.
+const MAX_PROFILE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// `path` dosyasını en fazla `limit` bayt okuyup UTF-8 metne çevirir.
+///
+/// Sınır aşılırsa `InvalidData` döner; dosyanın tamamı belleğe alınmaz.
+fn read_profile_text(path: &Path, limit: u64) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind, Read};
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() > limit {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "profil dosyası çok büyük",
+        ));
+    }
+    let mut contents = String::new();
+    file.take(limit + 1).read_to_string(&mut contents)?;
+    if contents.len() as u64 > limit {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "profil dosyası çok büyük",
+        ));
+    }
+    Ok(contents)
+}
+
 fn load_profile_file(config_path: &Path) -> ProfileConfig {
     if config_path.exists() {
         println!(
             "[BİLGİ] Yapılandırma dosyası okunuyor: {}",
             config_path.display()
         );
-        match fs::read_to_string(config_path) {
+        match read_profile_text(config_path, MAX_PROFILE_BYTES) {
             Ok(contents) => match parse_profile(&contents) {
                 Some(p) => p,
                 None => {
@@ -1158,8 +1795,8 @@ fn run_test_macro(profile: &ProfileConfig, macro_id: &str) -> i32 {
     let pressed = Arc::new(Mutex::new(HashSet::new()));
     let completed = execute_macro_actions(&actions, &vdev, &pressed, None);
     {
-        let mut dev = vdev.lock().unwrap();
-        let mut keys = pressed.lock().unwrap();
+        let mut dev = lock(&vdev);
+        let mut keys = lock(&pressed);
         release_all_keys(&mut dev, &mut keys);
     }
     if completed {
@@ -1196,19 +1833,45 @@ fn main() {
         std::process::exit(0);
     }
 
-    // Argümanlar: [--test-macro <id>] [profil.json]
+    // Argümanlar: [--test-macro <id>] [--record-mouse <dosya>]
+    //            [--watch-restart <KEY_*>] [--panic-key <KEY_*>]
+    //            [--start-x <px> --start-y <px>] [profil.json]
     let raw_args: Vec<String> = std::env::args().collect();
-    let mut test_macro_id: Option<String> = None;
-    let mut config_arg: Option<String> = None;
-    let mut args_iter = raw_args.iter().skip(1);
-    while let Some(arg) = args_iter.next() {
-        if arg == "--test-macro" {
-            test_macro_id = args_iter.next().cloned();
-        } else if !arg.starts_with("--") {
-            config_arg = Some(arg.clone());
-        }
+    let cli = parse_cli_args(&raw_args);
+
+    // Yeniden başlatma izleyicisi: profil, kilit veya uinput gerektirmez.
+    if let Some(key_arg) = &cli.watch_restart_key {
+        let key = string_to_key(key_arg).unwrap_or(Key::KEY_F12);
+        let name = if string_to_key(key_arg).is_some() {
+            key_arg.to_uppercase()
+        } else {
+            String::from("KEY_F12")
+        };
+        std::process::exit(run_watch_restart(key, &name));
     }
-    let config_path = config_arg
+
+    // Kayıt modu profil, kilit veya uinput gerektirmez.
+    if let Some(output) = &cli.record_mouse {
+        let (panic_key, panic_key_name) = match cli.panic_key.as_deref().and_then(string_to_key) {
+            Some(key) => (key, cli.panic_key.clone().unwrap_or_default()),
+            None => (Key::KEY_PAUSE, String::from("KEY_PAUSE")),
+        };
+        let start_override = match (cli.start_x, cli.start_y) {
+            (Some(x), Some(y)) => Some([
+                x.clamp(-1_000_000, 1_000_000),
+                y.clamp(-1_000_000, 1_000_000),
+            ]),
+            _ => None,
+        };
+        std::process::exit(run_record_mouse(
+            Path::new(output),
+            panic_key,
+            &panic_key_name,
+            start_override,
+        ));
+    }
+    let config_path = cli
+        .config
         .map(std::path::PathBuf::from)
         .filter(|path| path.exists())
         .or_else(|| {
@@ -1221,7 +1884,7 @@ fn main() {
     let mut profile: ProfileConfig = load_profile_file(&config_path);
 
     // Test modu kilit/aygıt taraması yapmadan tek makroyu çalıştırır.
-    if let Some(macro_id) = &test_macro_id {
+    if let Some(macro_id) = &cli.test_macro {
         std::process::exit(run_test_macro(&profile, macro_id));
     }
 
@@ -1308,26 +1971,26 @@ fn main() {
 
         // 3. GUI'den SIGUSR1 geldiyse profili yeniden başlatmadan tazele.
         if RELOAD.swap(false, Ordering::SeqCst) {
-            match fs::read_to_string(&config_path)
+            match read_profile_text(&config_path, MAX_PROFILE_BYTES)
                 .ok()
                 .and_then(|c| parse_profile(&c))
             {
                 Some(new_profile) => {
                     {
-                        let toggles = running_toggles.lock().unwrap();
+                        let toggles = lock(&running_toggles);
                         for flag in toggles.values() {
                             flag.store(false, Ordering::SeqCst);
                         }
                     }
-                    running_toggles.lock().unwrap().clear();
+                    lock(&running_toggles).clear();
                     {
-                        let mut dev = vdev_arc.lock().unwrap();
-                        let mut pressed = pressed_keys_arc.lock().unwrap();
+                        let mut dev = lock(&vdev_arc);
+                        let mut pressed = lock(&pressed_keys_arc);
                         release_all_keys(&mut dev, &mut pressed);
                     }
                     latched_combos.clear();
                     press_release_armed.clear();
-                    double_tap_tracker.lock().unwrap().clear();
+                    lock(&double_tap_tracker).clear();
 
                     if new_profile.virtual_device_name != profile.virtual_device_name {
                         println!("[YENİLE] Sanal aygıt adı değişikliği bir sonraki motor başlatmasında uygulanacak.");
@@ -1403,15 +2066,15 @@ fn main() {
                             );
                             PANIC_STOP.store(true, Ordering::SeqCst);
                             {
-                                let mut toggles = running_toggles.lock().unwrap();
+                                let mut toggles = lock(&running_toggles);
                                 for flag in toggles.values() {
                                     flag.store(false, Ordering::SeqCst);
                                 }
                                 toggles.clear();
                             }
                             {
-                                let mut dev = vdev_arc.lock().unwrap();
-                                let mut pressed = pressed_keys_arc.lock().unwrap();
+                                let mut dev = lock(&vdev_arc);
+                                let mut pressed = lock(&pressed_keys_arc);
                                 release_all_keys(&mut dev, &mut pressed);
                             }
                             println!("[STOP] Makro motoru durduruldu. Arayüzden yeniden başlatılana kadar makrolar çalışmayacaktır.");
@@ -1468,15 +2131,15 @@ fn main() {
                                         });
                                     }
                                     TriggerMode::REPEAT_COUNT | TriggerMode::TOGGLE_LOOP => {
-                                        let mut toggles = running_toggles.lock().unwrap();
+                                        let mut toggles = lock(&running_toggles);
                                         if let Some(flag) = toggles.get(&macro_id_key) {
                                             if flag.load(Ordering::SeqCst) {
                                                 println!("[DÖNGÜ KAPATILDI] Tetikleyiciye tekrar basıldı, makro durduruldu: '{}'", macro_name);
                                                 flag.store(false, Ordering::SeqCst);
                                                 toggles.remove(&macro_id_key);
                                                 drop(toggles);
-                                                let mut dev = vdev_arc.lock().unwrap();
-                                                let mut pressed = pressed_keys_arc.lock().unwrap();
+                                                let mut dev = lock(&vdev_arc);
+                                                let mut pressed = lock(&pressed_keys_arc);
                                                 release_all_keys(&mut dev, &mut pressed);
                                                 continue;
                                             }
@@ -1526,12 +2189,12 @@ fn main() {
                                                 }
                                             }
                                             {
-                                                let mut dev = vdev_c.lock().unwrap();
-                                                let mut pressed = pressed_c.lock().unwrap();
+                                                let mut dev = lock(&vdev_c);
+                                                let mut pressed = lock(&pressed_c);
                                                 release_all_keys(&mut dev, &mut pressed);
                                             }
                                             {
-                                                let mut t = toggles_ref.lock().unwrap();
+                                                let mut t = lock(&toggles_ref);
                                                 t.remove(&key_str);
                                             }
                                             if is_repeat {
@@ -1581,8 +2244,8 @@ fn main() {
                                                 }
                                             }
                                             {
-                                                let mut dev = vdev_c.lock().unwrap();
-                                                let mut pressed = pressed_c.lock().unwrap();
+                                                let mut dev = lock(&vdev_c);
+                                                let mut pressed = lock(&pressed_c);
                                                 release_all_keys(&mut dev, &mut pressed);
                                             }
                                             println!(
@@ -1595,7 +2258,7 @@ fn main() {
                                         let now = Instant::now();
                                         let tracker_key =
                                             format!("{}:{}", m.id, canonical_key_id(key));
-                                        let mut tracker = double_tap_tracker.lock().unwrap();
+                                        let mut tracker = lock(&double_tap_tracker);
                                         // Eski kayıtlar birikmesin; saklama süresi makronun penceresinden kısa olamaz.
                                         tracker.retain(|_, (t, window_ms)| {
                                             t.elapsed()
@@ -1746,14 +2409,14 @@ fn main() {
     // Temiz kapanış: basılı kalmış sanal tuş/fare düğmeleri serbest bırakılır.
     PANIC_STOP.store(true, Ordering::SeqCst);
     {
-        let toggles = running_toggles.lock().unwrap();
+        let toggles = lock(&running_toggles);
         for flag in toggles.values() {
             flag.store(false, Ordering::SeqCst);
         }
     }
     {
-        let mut dev = vdev_arc.lock().unwrap();
-        let mut pressed = pressed_keys_arc.lock().unwrap();
+        let mut dev = lock(&vdev_arc);
+        let mut pressed = lock(&pressed_keys_arc);
         release_all_keys(&mut dev, &mut pressed);
     }
     println!("[MacroStat Motor] Temiz kapanış tamamlandı.");
@@ -1764,12 +2427,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sanitizes_virtual_device_name() {
+        assert_eq!(sanitize_device_name(""), "MacroStat Virtual Engine");
+        assert_eq!(sanitize_device_name("   "), "MacroStat Virtual Engine");
+        assert_eq!(sanitize_device_name("Klavye\0\x1b"), "Klavye");
+        let long = "A".repeat(200);
+        assert!(sanitize_device_name(&long).chars().count() <= 80);
+        assert!(!sanitize_device_name("Kötü\0Ad").contains('\0'));
+    }
+
+    #[test]
     fn parses_common_key_names() {
         assert_eq!(string_to_key("KEY_A"), Some(Key::KEY_A));
         assert_eq!(string_to_key("a"), Some(Key::KEY_A));
         assert_eq!(string_to_key("MOUSE5"), Some(Key::BTN_EXTRA));
         assert_eq!(string_to_key("CODE_30"), Some(Key::new(30)));
         assert_eq!(string_to_key("bilinmeyen-tus"), None);
+    }
+
+    #[test]
+    fn parse_cli_args_reads_watch_restart() {
+        let raw: Vec<String> = [
+            "macrostat-daemon",
+            "--watch-restart",
+            "KEY_F12",
+            "profile.json",
+        ]
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
+        let parsed = parse_cli_args(&raw);
+        assert_eq!(parsed.watch_restart_key.as_deref(), Some("KEY_F12"));
+        assert_eq!(parsed.config.as_deref(), Some("profile.json"));
     }
 
     #[test]
@@ -1846,6 +2535,30 @@ mod tests {
     }
 
     #[test]
+    fn mouse_path_action_parses_points() {
+        let json = r#"{"type":"MOUSE_PATH","points":[[0,3,-1],[4,5,0],[12,0,2]]}"#;
+        let action: MacroAction = serde_json::from_str(json).expect("MOUSE_PATH ayrıştırılmalı");
+        assert_eq!(action.r#type, ActionType::MOUSE_PATH);
+        let points = action.points.expect("noktalar okunmalı");
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[1], [4, 5, 0]);
+        assert_eq!(action.start, None);
+    }
+
+    #[test]
+    fn mouse_path_action_parses_start_position() {
+        let json = r#"{"type":"MOUSE_PATH","points":[[0,1,2]],"start":[1280,-240]}"#;
+        let action: MacroAction = serde_json::from_str(json).expect("başlangıç noktası okunmalı");
+        assert_eq!(action.start, Some([1280, -240]));
+    }
+
+    #[test]
+    fn mouse_path_requires_valid_point_shape() {
+        let json = r#"{"type":"MOUSE_PATH","points":[[0,1,2],[4,5]]}"#;
+        assert!(serde_json::from_str::<MacroAction>(json).is_err());
+    }
+
+    #[test]
     fn canonical_ids_group_modifier_sides() {
         assert_eq!(
             canonical_key_id(Key::KEY_LEFTCTRL),
@@ -1899,5 +2612,40 @@ mod tests {
             false,
             &held
         ));
+    }
+
+    #[test]
+    fn profile_reader_enforces_size_limit() {
+        let path = std::env::temp_dir().join(format!(
+            "macrostat-profile-size-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::write(&path, "x".repeat(200)).expect("geçici profil dosyası");
+        assert!(read_profile_text(&path, 200).is_ok());
+        let err = read_profile_text(&path, 199).expect_err("sınır aşılmalı");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lock_file_ownership_is_verified() {
+        let path = std::env::temp_dir().join(format!(
+            "macrostat-lock-ownership-{}-{:?}.lock",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("geçici kilit dosyası");
+        let uid = unsafe { libc::getuid() };
+        assert!(lock_file_owned_by(&file, uid));
+        assert!(!lock_file_owned_by(&file, uid.wrapping_add(1)));
+        drop(file);
+        let _ = fs::remove_file(&path);
     }
 }

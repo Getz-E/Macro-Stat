@@ -1,14 +1,18 @@
 target/
-*.AppImage
-MacroStat.AppDir/
-appimagetool
 __pycache__/
 *.pyc
 *.bak
 *.tmp
 
+# Yerel dağıtım arşivleri (release.yml ile aynı düzen)
+/dist/
+
 # Derlenmiş motor ikilisi (cargo build --release üretir)
-/cachymacro-daemon
+/macrostat-daemon
+
+# Yerel tasarım notları ve araç yapılandırması (depoya girmez)
+/docs/superpowers/
+/.claude/
 
 # makepkg çalışma dizinleri (src/ ile çakışmasın)
 /.makepkg/

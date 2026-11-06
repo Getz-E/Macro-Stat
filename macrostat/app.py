@@ -2,6 +2,10 @@
 # Copyright (C) 2026 MacroStat contributors
 """MacroStat uygulama sınıfı ve giriş noktası."""
 
+import fcntl
+import os
+import sys
+
 from . import common, theme
 from .common import *  # noqa: F401,F403
 from .core import CoreMixin
@@ -21,9 +25,13 @@ _GUI_LOCK = None
 def acquire_gui_single_instance():
     """İkinci bir arayüz örneğinin aynı profili/motoru yönetmesini engeller."""
     global _GUI_LOCK
-    lock_path = common.RUNTIME_DIR / f"cachymacro-gui-{os.getuid()}.lock"
+    lock_path = common.RUNTIME_DIR / f"macrostat-gui-{os.getuid()}.lock"
     try:
-        handle = open(lock_path, "w", encoding="utf-8")
+        # Sabit adlı kilidi başka bir kullanıcı sembolik bağlantıyla yönlendirmesin.
+        flags = (os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
+                 | getattr(os, "O_NOFOLLOW", 0))
+        fd = os.open(lock_path, flags, 0o600)
+        handle = os.fdopen(fd, "w", encoding="utf-8")
     except OSError:
         # Kilit dosyası açılamazsa (salt-okunur / kısıtlı dizin) uygulamayı engelleme.
         return True
@@ -32,6 +40,9 @@ def acquire_gui_single_instance():
     except OSError:
         handle.close()
         return False
+    # Önceki (daha uzun) pid metni kalmasın.
+    handle.seek(0)
+    handle.truncate()
     handle.write(str(os.getpid()))
     handle.flush()
     _GUI_LOCK = handle
@@ -48,9 +59,10 @@ def release_gui_single_instance():
         _GUI_LOCK = None
 
 def main():
-    set_language(load_settings().get("language", "tr"))
+    user_settings = load_settings()
+    set_language(user_settings.get("language", "tr"))
     app = QApplication(sys.argv)
-    theme.apply_theme(app)
+    theme.apply_theme(app, user_settings.get("theme", "dark"))
     if not acquire_gui_single_instance():
         QMessageBox.warning(None, "MacroStat", T("MacroStat zaten çalışıyor. Mevcut pencereyi kullanın."))
         sys.exit(0)

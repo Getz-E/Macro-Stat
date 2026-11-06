@@ -2,9 +2,59 @@
 # Copyright (C) 2026 MacroStat contributors
 """Makro listesi, içe/dışa aktarma ve profil yönetimi."""
 
-from . import common, theme
+import re
+import time
+from pathlib import Path
+
+from . import common, theme, transfer
 from .common import *  # noqa: F401,F403
 from .widgets import SlidingSwitch, KeyCaptureDialog  # noqa: F401
+
+
+class ExportSelectionDialog(QDialog):
+    """Dışa aktarılacak profilleri onay kutularıyla seçtirir."""
+
+    def __init__(self, parent, profiles, active_profile_id=""):
+        super().__init__(parent)
+        self.setWindowTitle(T("Dışa Aktarılacak Profiller"))
+        self.resize(420, 340)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        info = QLabel(T("Dışa aktarılacak profilleri seçin:"))
+        layout.addWidget(info)
+
+        self.list = QListWidget()
+        for index, profile in enumerate(profiles):
+            item = QListWidgetItem(
+                profile.get("name") or profile.get("id") or T("Profil"))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = profile.get("id") == active_profile_id
+            item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, index)
+            self.list.addItem(item)
+        layout.addWidget(self.list)
+
+        row = QHBoxLayout()
+        btn_ok = QPushButton(T("Dışa Aktar"))
+        theme.set_variant(btn_ok, "primary")
+        btn_ok.clicked.connect(self.accept)
+        row.addWidget(btn_ok)
+        btn_cancel = QPushButton(T("İptal"))
+        theme.set_variant(btn_cancel, "muted")
+        btn_cancel.clicked.connect(self.reject)
+        row.addWidget(btn_cancel)
+        layout.addLayout(row)
+
+    def selected_profiles(self):
+        selected = []
+        for row in range(self.list.count()):
+            item = self.list.item(row)
+            if item.checkState() == Qt.CheckState.Checked:
+                selected.append(item.data(Qt.ItemDataRole.UserRole))
+        return selected
+
 
 class MacrosMixin:
     """Makro listesi, içe/dışa aktarma ve profil yönetimi."""
@@ -37,28 +87,28 @@ class MacrosMixin:
         layout.addWidget(self.macro_table)
 
         btn_layout = QHBoxLayout()
-        self.btn_add_macro = QPushButton(T("➕ Yeni Makro"))
+        self.btn_add_macro = QPushButton(T("Yeni Makro"))
         self.btn_add_macro.clicked.connect(self.create_new_macro)
         btn_layout.addWidget(self.btn_add_macro)
 
-        self.btn_edit_macro = QPushButton(T("✏️ Düzenle"))
+        self.btn_edit_macro = QPushButton(T("Düzenle"))
         self.btn_edit_macro.clicked.connect(self.edit_selected_macro)
         btn_layout.addWidget(self.btn_edit_macro)
 
-        self.btn_dup_macro = QPushButton(T("📑 Klonla"))
+        self.btn_dup_macro = QPushButton(T("Klonla"))
         self.btn_dup_macro.clicked.connect(self.duplicate_selected_macro)
         btn_layout.addWidget(self.btn_dup_macro)
 
-        self.btn_del_macro = QPushButton(T("✕ Sil (Del)"))
+        self.btn_del_macro = QPushButton(T("Sil (Del)"))
         theme.set_variant(self.btn_del_macro, "ghostDanger")
         self.btn_del_macro.clicked.connect(self.delete_selected_macro)
         btn_layout.addWidget(self.btn_del_macro)
 
-        self.btn_export = QPushButton(T("📤 Dışa Aktar"))
+        self.btn_export = QPushButton(T("Dışa Aktar…"))
         self.btn_export.clicked.connect(self.export_profile)
         btn_layout.addWidget(self.btn_export)
 
-        self.btn_import = QPushButton(T("📥 İçe Aktar"))
+        self.btn_import = QPushButton(T("İçe Aktar…"))
         self.btn_import.clicked.connect(self.import_profile)
         btn_layout.addWidget(self.btn_import)
 
@@ -73,42 +123,38 @@ class MacrosMixin:
         self.refresh_macro_table()
 
     def export_profile(self):
-        box = QMessageBox(self)
-        box.setWindowTitle(T("Dışa Aktarım Kapsamı"))
-        box.setText(T("Yalnızca aktif profili mi, tüm profilleri mi dışa aktarmak istersiniz?"))
-        btn_active = box.addButton(T("Aktif Profil"), QMessageBox.ButtonRole.AcceptRole)
-        btn_all = box.addButton(T("Tüm Profiller"), QMessageBox.ButtonRole.ActionRole)
-        box.addButton(QMessageBox.StandardButton.Cancel)
-        box.exec()
-        clicked = box.clickedButton()
-        if clicked is btn_active:
-            profiles = [self.profile_data]
-            default_name = f"macrostat-{self.profile_data.get('id', 'profil')}.json"
-        elif clicked is btn_all:
-            profiles = self.all_profiles
-            default_name = "macrostat-tum-profiller.json"
-        else:
+        if not self.all_profiles:
+            QMessageBox.warning(self, T("Dışa Aktarma"),
+                                T("Dışa aktarılacak profil bulunamadı."))
             return
+        dialog = ExportSelectionDialog(self, self.all_profiles, self.active_profile_id)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        indexes = dialog.selected_profiles()
+        if not indexes:
+            return
+        profiles = [self.all_profiles[i] for i in indexes if 0 <= i < len(self.all_profiles)]
+        if not profiles:
+            return
+        if len(profiles) == 1:
+            label = re.sub(r"[^A-Za-z0-9_-]+", "-",
+                           profiles[0].get("name") or "profil").strip("-") or "profil"
+            default_name = "macrostat-{}.json".format(label[:40])
+        else:
+            default_name = "macrostat-profiller.json"
         path, _ = QFileDialog.getSaveFileName(
-            self, T("Profili Dışa Aktar"), str(Path.home() / default_name), "JSON (*.json)")
+            self, T("Profilleri Dışa Aktar"),
+            str(Path.home() / default_name), "JSON (*.json)")
         if not path:
             return
-        payload = {
-            "schemaVersion": 1,
-            "exportedAt": int(time.time() * 1000),
-            "activeProfileId": self.active_profile_id,
-            "profiles": profiles,
-        }
-        tmp = Path(path).with_name(Path(path).name + ".tmp")
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, path)
-            prefix = T("Tüm profiller dışa aktarıldı: ") if clicked is btn_all \
-                else T("Profil dışa aktarıldı: ")
-            self.show_autosave_banner(prefix + str(path))
-        except Exception as e:
-            QMessageBox.critical(self, T("Dışa Aktarma Hatası"), str(e))
+            transfer.export_profiles(
+                profiles, path,
+                self.active_profile_id if len(profiles) == 1 else "")
+            self.show_autosave_banner(
+                T("{} profil dışa aktarıldı: {}").format(len(profiles), path))
+        except transfer.TransferError as exc:
+            QMessageBox.critical(self, T("Dışa Aktarma Hatası"), str(exc))
 
     def import_profile(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -116,74 +162,55 @@ class MacrosMixin:
         if not path:
             return
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = transfer.load_payload(path)
+            existing_macros = {
+                m.get("id") for p in self.all_profiles
+                for m in p.get("macros", []) if isinstance(m, dict) and m.get("id")
+            }
+            existing_profiles = {
+                p.get("id") for p in self.all_profiles if p.get("id")
+            }
+            result = transfer.import_payload(
+                data, existing_macros, existing_profiles)
+        except transfer.TransferError as exc:
+            QMessageBox.critical(self, T("İçe Aktarma Hatası"), str(exc))
+            return
 
-            base = int(time.time() * 1000)
-            profiles = data.get("profiles") if isinstance(data, dict) else None
-            if isinstance(profiles, list) and profiles:
-                # Sarmalayıcı dosya: profilleri ayrı profiller olarak ekle.
-                imported_profiles = []
-                for i, profile in enumerate(profiles):
-                    if not isinstance(profile, dict):
-                        continue
-                    imported_p = copy.deepcopy(profile)
-                    imported_p["id"] = f"profile-{base}-{i}"
-                    imported_p["name"] = (
-                        (imported_p.get("name") or "Profil") + T(" (İçe Aktarıldı)"))
-                    for j, macro in enumerate(imported_p.get("macros", [])):
-                        macro["id"] = f"macro-{base}-{i}-{j}"
-                        macro["enabled"] = False
-                        trigger = macro.get("triggerKey", macro.get("trigger_key"))
-                        if not common.is_valid_trigger(trigger):
-                            macro["triggerKey"] = ""
-                        for k, action in enumerate(macro.get("actions", [])):
-                            action["id"] = f"act-{base}-{i}-{j}-{k}"
-                        for k, action in enumerate(macro.get("releaseActions", [])):
-                            action["id"] = f"rel-{base}-{i}-{j}-{k}"
-                    imported_profiles.append(imported_p)
-                if not imported_profiles:
-                    raise ValueError(T("Dosyada içe aktarılabilir makro/profil bulunamadı."))
-                self.all_profiles.extend(imported_profiles)
+        summary = T("İçe aktarılacak: {} makro, {} profil.").format(
+            len(result["macros"]), len(result["profiles"]))
+        if result["warnings"]:
+            summary += "\n\n" + T("{} uyarı:").format(len(result["warnings"]))
+            summary += "\n" + "\n".join(result["warnings"][:8])
+            if len(result["warnings"]) > 8:
+                summary += "\n…"
+        answer = QMessageBox.question(
+            self, T("İçe Aktarmayı Onayla"),
+            summary + "\n\n" + T("Mevcut makro ve profiller silinmez; "
+                                 "içe aktarılan makrolar güvenlik için devre dışı eklenir."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            used_names = {
+                p.get("name") for p in self.all_profiles if p.get("name")
+            }
+            for profile in result["profiles"]:
+                profile["name"] = transfer.unique_name(profile.get("name"), used_names)
+                used_names.add(profile["name"])
+                self.all_profiles.append(profile)
+            if result["profiles"]:
                 self.populate_profile_combo()
-                self.save_profile_to_disk(restart_daemon=True)
-                self.refresh_macro_table()
-                self.show_autosave_banner(
-                    T("📥 {} profil içe aktarıldı (makroları devre dışı).").format(
-                        len(imported_profiles)))
-                return
-
-            macros = []
-            if isinstance(data, list):
-                macros = [m for m in data if isinstance(m, dict)
-                          and ("triggerKey" in m or "trigger_key" in m)]
-            elif isinstance(data, dict) and isinstance(data.get("macros"), list):
-                macros = data["macros"]
-
-            if not macros:
-                raise ValueError(T("Dosyada içe aktarılabilir makro/profil bulunamadı."))
-
-            for i, macro in enumerate(macros):
-                imported = copy.deepcopy(macro)
-                imported["id"] = f"macro-{base}-{i}"
-                imported["name"] = (imported.get('name') or 'Makro') + T(" (İçe Aktarıldı)")
-                # Güvenlik: içe aktarılan makrolar kullanıcı onaylayana dek kapalıdır.
-                imported["enabled"] = False
-                trigger = imported.get("triggerKey", imported.get("trigger_key"))
-                if not common.is_valid_trigger(trigger):
-                    imported["triggerKey"] = ""
-                for j, action in enumerate(imported.get("actions", [])):
-                    action["id"] = f"act-{base}-{i}-{j}"
-                for j, action in enumerate(imported.get("releaseActions", [])):
-                    action["id"] = f"rel-{base}-{i}-{j}"
-                self.profile_data.setdefault("macros", []).append(imported)
-
+            for macro in result["macros"]:
+                self.profile_data.setdefault("macros", []).append(macro)
             self.save_profile_to_disk(restart_daemon=True)
             self.refresh_macro_table()
             self.show_autosave_banner(
-                T("📥 {} makro içe aktarıldı (güvenlik için devre dışı).").format(len(macros)))
-        except Exception as e:
-            QMessageBox.critical(self, T("İçe Aktarma Hatası"), str(e))
+                T("{} makro ve {} profil içe aktarıldı (makrolar devre dışı).").format(
+                    len(result["macros"]), len(result["profiles"])))
+        except Exception as exc:
+            QMessageBox.critical(self, T("İçe Aktarma Hatası"), str(exc))
 
     def refresh_macro_table(self):
         macros = self.profile_data.get("macros", [])
@@ -254,7 +281,7 @@ class MacrosMixin:
             del_layout.setContentsMargins(4, 2, 4, 2)
             del_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            btn_x = QPushButton("✕")
+            btn_x = QPushButton("×")
             btn_x.setFixedSize(26, 24)
             theme.set_variant(btn_x, "ghostDanger")
             btn_x.setProperty("compact", "true")

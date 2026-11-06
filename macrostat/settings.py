@@ -7,7 +7,24 @@ import os
 import tempfile
 from pathlib import Path
 
-SETTINGS_PATH = Path.home() / ".config" / "cachymacro" / "settings.json"
+#: Kullanıcı yapılandırma dizini. 0.x geliştirme sürümleri eski adı
+#: (`cachymacro`) kullanıyordu; veri kaybı olmaması için tek seferlik taşınır.
+CONFIG_DIR = Path.home() / ".config" / "macrostat"
+_LEGACY_CONFIG_DIR = Path.home() / ".config" / "cachymacro"
+
+
+def _migrate_legacy_config():
+    if CONFIG_DIR.exists() or not _LEGACY_CONFIG_DIR.is_dir():
+        return
+    try:
+        CONFIG_DIR.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(_LEGACY_CONFIG_DIR, CONFIG_DIR)
+    except OSError:
+        pass
+
+
+_migrate_legacy_config()
+SETTINGS_PATH = CONFIG_DIR / "settings.json"
 
 
 def _detect_language():
@@ -16,15 +33,27 @@ def _detect_language():
     return "en" if value.startswith("en") else "tr"
 
 
+THEME_MODES = ("system", "dark", "light")
+
+
 def load_settings():
     """Ayarları okur; eksik/bozuk dosyada güvenli varsayılan döndürür."""
-    defaults = {"language": _detect_language()}
+    defaults = {
+        "language": _detect_language(),
+        "theme": "dark",
+        "onboarding_completed": False,
+        "log_panel_visible": False,
+    }
     try:
         with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
             if data.get("language") not in ("tr", "en"):
                 data["language"] = defaults["language"]
+            if data.get("theme") not in THEME_MODES:
+                data["theme"] = defaults["theme"]
+            data.setdefault("onboarding_completed", False)
+            data.setdefault("log_panel_visible", False)
             return data
     except Exception:
         pass

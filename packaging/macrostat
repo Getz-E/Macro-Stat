@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 MacroStat contributors
-# Paket kurulumu için başlatıcı: arayüz /usr/lib/macrostat altındadır.
+# Launcher for the packaged install: the interface lives in /usr/lib/macrostat.
 set -euo pipefail
 exec python3 /usr/lib/macrostat/gui.py "$@"

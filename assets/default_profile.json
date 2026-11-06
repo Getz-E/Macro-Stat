@@ -1,12 +1,13 @@
 {
   "schemaVersion": 1,
-  "activeProfileId": "profile-cachy-default",
+  "activeProfileId": "profile-default",
   "profiles": [
     {
-      "id": "profile-cachy-default",
+      "id": "profile-default",
       "name": "MacroStat Varsayılan Profil",
-      "description": "CachyOS & KDE Plasma için donanım tabanlı sıfır gecikmeli makrolar. Varsayılan demolar güvenlik için devre dışıdır.",
+      "description": "Donanım tabanlı sıfır gecikmeli makrolar. Varsayılan demolar güvenlik için devre dışıdır.",
       "panicKey": "KEY_PAUSE",
+      "restartKey": "KEY_F12",
       "virtualDeviceName": "MacroStat Virtual Engine",
       "defaultJitterMs": 2,
       "macros": [
