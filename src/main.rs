@@ -44,7 +44,7 @@ static ACTION_LOCK: Mutex<()> = Mutex::new(());
 /// gerçek ekran konumunu güvenilir biçimde bildirmediğinden bu yol kullanılmaz;
 /// orada kayıt göreli hareketle, oynatma da imlecin o anki konumundan başlar.
 mod x11 {
-    use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
+    use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void, CStr};
     use std::sync::OnceLock;
 
     type OpenDisplay = unsafe extern "C" fn(*const c_char) -> *mut c_void;
@@ -94,9 +94,12 @@ mod x11 {
     }
 
     unsafe fn load() -> Option<Api> {
-        // C-string değişmezi (Rust 1.77) yerine bayt dizisi: Ubuntu 24.04'ün
-        // rustc 1.75'i ile de derlenebilsin.
-        let handle = unsafe { libc::dlopen(b"libX11.so.6\0".as_ptr().cast(), libc::RTLD_LAZY) };
+        // Proje politikası gereği `c"..."` değişmezi kullanılmıyor; lint yalnızca
+        // bu satırda, gerekçesiyle susturuluyor.
+        #[allow(clippy::manual_c_str_literals)]
+        let library =
+            CStr::from_bytes_with_nul(b"libX11.so.6\0").expect("libX11 adı NUL ile bitmeli");
+        let handle = unsafe { libc::dlopen(library.as_ptr(), libc::RTLD_LAZY) };
         if handle.is_null() {
             return None;
         }
