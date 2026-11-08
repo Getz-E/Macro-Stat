@@ -26,23 +26,28 @@ def _stat_result(mode, uid):
 
 
 def _fake_stat(entries):
-    """Belirtilen yollar için sahte stat sonucu döndürür."""
+    """Belirtilen yollar için sahte stat sonucu döndürür.
+
+    Sahte kaydı olmayan yollar gerçek dosya sistemiyle doğrulanır; böylece
+    ``locate_paths`` gibi geçici dizinlerdeki gerçek dosya/dizinleri denetleyen
+    kod yanlışlıkla hata almaz. Gerçekten bulunmayan yollar için gerçek
+    ``FileNotFoundError`` (errno=ENOENT) korunur; ``Path.exists()`` bunu
+    "yok" olarak yorumlayabilir.
+    """
     entries = {str(path): info for path, info in entries.items()}
 
     def fake_stat(self, *, follow_symlinks=True):
-        if not follow_symlinks:
-            try:
-                actual = os.lstat(self)
-                if stat.S_ISLNK(actual.st_mode):
-                    return actual
-            except OSError:
-                pass
-        try:
-            return entries[str(self)]
-        except KeyError:
-            raise FileNotFoundError(str(self))
-
+        key = str(self)
+        if not follow_symlinks and os.path.islink(key):
+            # Bağlantının kendisi istendi: hedefin değil, gerçek lstat bilgisi.
+            return os.lstat(key)
+        if key in entries:
+            return entries[key]
+        if follow_symlinks:
+            return os.stat(key)
+        return os.lstat(key)
     return fake_stat
+
 
 def _owned_entries(path, uid, unsafe=None):
     """Dosya ve tüm üst dizinleri için sahte stat sonuçları üretir."""
