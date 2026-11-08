@@ -29,7 +29,8 @@ def _fake_stat(entries):
     """Belirtilen yollar için sahte stat sonucu döndürür."""
     entries = {str(path): info for path, info in entries.items()}
 
-    def fake_stat(self):
+    def fake_stat(self, *, follow_symlinks=True):
+        # Python 3.12+ Path.stat imzasıyla uyumludur.
         try:
             return entries[str(self)]
         except KeyError:
