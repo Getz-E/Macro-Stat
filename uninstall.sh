@@ -12,6 +12,12 @@
 # ==============================================================================
 set -euo pipefail
 
+# Yardımcı kütüphane source edilmeden önce kök çalıştırmayı reddet.
+if [ "$(id -u)" -eq 0 ]; then
+    printf '❌ Do not run this uninstaller as root. Run it as your regular user; the script elevates only the udev/shortcut removals.\n' >&2
+    exit 1
+fi
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 # shellcheck source=packaging/install-common.sh
@@ -24,11 +30,20 @@ is_ours() {
 }
 
 remove_file() {
-    local path="$1"
-    if rm -f "$path" 2>/dev/null; then
-        return 0
+    local path="$1" rm_bin
+    if rm_bin="$(trusted_executable rm)"; then
+        "$rm_bin" -f "$path" 2>/dev/null && return 0
     fi
-    run_privileged rm -f "$path"
+    run_root_tool rm -f "$path"
+}
+
+reload_udev_rules() {
+    local rules_path="$1"
+    if [ "$rules_path" = "$DEFAULT_RULES" ] &&
+            trusted_executable udevadm >/dev/null 2>&1; then
+        run_root_tool udevadm control --reload-rules || true
+        run_root_tool udevadm trigger || true
+    fi
 }
 
 main() {
@@ -105,11 +120,7 @@ main() {
         if cmp -s "$rules_path" <(udev_rule_content); then
             remove_file "$rules_path"
             removed=$((removed + 1))
-            if [ "$rules_path" = "$DEFAULT_RULES" ] &&
-                    command -v udevadm >/dev/null 2>&1; then
-                run_privileged udevadm control --reload-rules || true
-                run_privileged udevadm trigger || true
-            fi
+            reload_udev_rules "$rules_path"
         else
             printf '   ⚠️  %s contains a different rule; kept.\n' "$rules_path"
             kept=$((kept + 1))
@@ -130,4 +141,7 @@ main() {
     printf '   Note: Rust build outputs, logs and system packages were not removed.\n'
 }
 
-main "$@"
+# Test yamaları betiği source edebilsin; doğrudan çalıştırıldığında main koşar.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

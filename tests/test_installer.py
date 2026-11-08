@@ -3,6 +3,7 @@
 """Dağıtıma özel kurulum betikleri ve masaüstü kısayolu."""
 
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -228,8 +229,6 @@ class UbuntuRepositoryTests(unittest.TestCase):
             bindir.mkdir()
             log = Path(tmp) / "calls.log"
             scripts = {
-                "id": '#!/bin/bash\n[ "${1:-}" = "-u" ] && { echo 0; exit 0; }\n'
-                      'exec /usr/bin/id "$@"\n',
                 "apt-cache": '#!/bin/bash\nexit {}\n'.format(apt_cache_rc),
                 "apt-get": '#!/bin/bash\necho "apt-get $*" >> "{}"\n'.format(log),
                 "add-apt-repository":
@@ -239,9 +238,18 @@ class UbuntuRepositoryTests(unittest.TestCase):
                 path = bindir / name
                 path.write_text(body, encoding="utf-8")
                 path.chmod(0o755)
-            result = run_bash(
-                'set -euo pipefail; source "{}"; ensure_pyqt6_repo'.format(COMMON),
-                {"PATH": "{}:{}".format(bindir, os.environ["PATH"])})
+            # Yol çözümlemesi kendi testlerinde doğrulanır; burada depo
+            # mantığını denemek için yalnızca araç çözümü stub'lanır.
+            script = (
+                'set -euo pipefail; source "{}"; '
+                'trusted_executable() {{ '
+                'if [ "$1" = "apt-cache" ]; then '
+                'printf "%s\\n" "$STUB_BIN/apt-cache"; return 0; fi; '
+                'return 1; }}; '
+                'run_root_tool() {{ local name="$1"; shift; '
+                '"$STUB_BIN/$name" "$@"; }}; ensure_pyqt6_repo'
+            ).format(COMMON)
+            result = run_bash(script, {"STUB_BIN": str(bindir)})
             calls = log.read_text(encoding="utf-8") if log.exists() else ""
         return result, calls
 
@@ -258,6 +266,98 @@ class UbuntuRepositoryTests(unittest.TestCase):
 
 
 class ReleasePipelineTests(unittest.TestCase):
+    def test_actions_are_pinned_to_immutable_shas(self):
+        import re
+        for name in ("ci.yml", "release.yml"):
+            text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            for line in text.splitlines():
+                if "uses:" not in line:
+                    continue
+                self.assertRegex(
+                    line.strip(), r"^-?\s*uses: [^@\s]+@[0-9a-f]{40}(\s+#.*)?$",
+                    "{}: eylem sabit SHA'ya sabitlenmeli: {}".format(name, line))
+
+    def test_release_runs_tests_and_audit_before_publishing(self):
+        text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("cargo fmt --check", text)
+        self.assertIn("cargo clippy --all-targets", text)
+        self.assertIn("cargo test --release --locked", text)
+        self.assertIn("unittest discover -s tests", text)
+        self.assertIn("cargo audit", text)
+        # Yayın işi doğrulama işlerine bağlı olmalı.
+        self.assertRegex(text, r"(?m)^\s+needs:\s*\n?\s*\[?.*verify")
+        self.assertRegex(text, r"(?m)^\s+needs:\s*\n?\s*\[?.*python")
+        self.assertRegex(text, r"(?m)^\s+needs:\s*\n?\s*\[?.*audit")
+
+    def test_release_permissions_are_minimal_and_attested(self):
+        text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("attest-build-provenance", text)
+        self.assertIn("subject-path", text)
+        self.assertIn("attestations: write", text)
+        self.assertIn("id-token: write", text)
+        top = text.split("jobs:", 1)[0]
+        self.assertIn("permissions:\n  contents: read", top)
+        self.assertNotIn("contents: write", top)
+        self.assertNotIn("pull_request_target", text)
+
+    def test_workflows_never_expose_repository_secrets_to_fork_builds(self):
+        for name in ("ci.yml", "release.yml"):
+            text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            self.assertNotIn("secrets.", text, name)
+            self.assertNotIn("pull_request_target", text, name)
+
+    def test_release_checksum_is_relative_and_verifiable(self):
+        text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            '(cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")',
+            text)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = Path(tmp) / "dist"
+            dist.mkdir()
+            name = "macrostat-v1.0.0-linux-x86_64"
+            archive = dist / (name + ".tar.gz")
+            archive.write_bytes(b"simulated release archive")
+            result = subprocess.run(
+                ["bash", "-c",
+                 '(cd "{}" && sha256sum "$NAME.tar.gz" > '
+                 '"$NAME.tar.gz.sha256")'.format(dist)],
+                env={**os.environ, "NAME": name},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            checksum = (dist / (name + ".tar.gz.sha256")).read_text(
+                encoding="utf-8").strip()
+            self.assertEqual(checksum.split()[-1], name + ".tar.gz")
+
+            download = Path(tmp) / "download"
+            download.mkdir()
+            shutil.copy2(archive, download / archive.name)
+            shutil.copy2(dist / (archive.name + ".sha256"),
+                         download / (archive.name + ".sha256"))
+            verified = subprocess.run(
+                ["sha256sum", "-c", archive.name + ".sha256"],
+                cwd=str(download), capture_output=True, text=True)
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+
+    def test_release_documents_artifact_verification(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("gh attestation verify", readme)
+        self.assertIn("sha256sum -c", readme)
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        self.assertIn("Release integrity", security)
+        self.assertIn("Sürüm bütünlüğü", security)
+
+    def test_audit_tool_is_version_pinned(self):
+        for name in ("ci.yml", "release.yml"):
+            text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+            self.assertIn("cargo-audit --version", text, name)
+            self.assertNotIn("cargo install --locked cargo-audit\n", text, name)
+
+    def test_pyqt6_major_version_is_bounded(self):
+        text = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("PyQt6>=6.5,<7", text)
+
     def test_appimage_support_is_removed(self):
         self.assertFalse((ROOT / "build_appimage.sh").exists())
         ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -288,12 +388,181 @@ class ReleasePipelineTests(unittest.TestCase):
         self.assertNotEqual(versions[0].strip(), "version = 4")
 
 
+class UdevScopeTests(unittest.TestCase):
+    """udev kuralı dar kalır ve kullanıcı geneli etkisi açıkça bildirilir."""
+
+    def test_rule_uses_narrow_uaccess_permission(self):
+        text = (ROOT / "packaging/99-macrostat.rules").read_text(encoding="utf-8")
+        self.assertIn('TAG+="uaccess"', text)
+        self.assertIn('MODE="0660"', text)
+        self.assertNotIn("0666", text)
+        self.assertNotIn('GROUP="input"', text)
+
+    def test_installer_warns_that_uaccess_is_user_wide(self):
+        text = COMMON.read_text(encoding="utf-8")
+        self.assertIn("logged-in user, not to MacroStat alone", text)
+        self.assertIn("privileged broker", text)
+
+    def test_gui_permissions_page_warns_that_uaccess_is_user_wide(self):
+        text = (ROOT / "macrostat/onboarding.py").read_text(encoding="utf-8")
+        self.assertIn("kullanıcı genelinde", text)
+        self.assertIn("ayrıcalıklı bir aracı", text)
+
+    def test_documents_state_the_limitation_in_both_languages(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        self.assertIn("user-wide, not per application", readme)
+        self.assertIn("kullanıcı genelindedir, uygulama başına değildir", readme)
+        self.assertIn("user-wide, not application-wide", security)
+        self.assertIn("kullanıcı genelindedir, uygulama genelinde değildir", security)
+
+
+class TrustedToolTests(unittest.TestCase):
+    """Kurulum betiği ayrıcalıklı araçları PATH'ten çözmemeli."""
+
+    def _run(self, body, env=None):
+        # PATH kasıtlı olarak saldırgan dizine ayarlandığında bash'i de
+        # PATH'ten çözmemek için mutlak kabuk yolu kullanılır.
+        full_env = os.environ.copy()
+        full_env.update(env or {})
+        return subprocess.run(
+            ["/bin/bash", "-c",
+             'set -euo pipefail; source "{}"; {}'.format(COMMON, body)],
+            capture_output=True, text=True, env=full_env)
+
+    def test_tool_is_found_in_trusted_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "sh"
+            fake.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+            fake.chmod(0o755)
+            result = self._run("trusted_executable sh", {"PATH": tmp})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        found = Path(result.stdout.strip())
+        self.assertTrue(found.is_absolute())
+        self.assertNotEqual(found.parent, Path(tmp))
+        self.assertEqual(found.name, "sh")
+
+    def test_path_only_tool_is_never_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "macrostat-untrusted-tool"
+            fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake.chmod(0o755)
+            result = self._run(
+                "declare -F trusted_executable >/dev/null; "
+                "if trusted_executable macrostat-untrusted-tool; "
+                "then exit 9; fi; echo rejected", {"PATH": tmp})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "rejected")
+
+    def test_user_writable_trusted_directory_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "tool"
+            fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake.chmod(0o755)
+            result = self._run(
+                "declare -F trusted_executable >/dev/null; "
+                'TRUSTED_BIN_DIRS=("{}"); '
+                "if trusted_executable tool; then exit 9; fi; echo rejected"
+                .format(tmp))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "rejected")
+
+    def test_names_with_path_separators_are_rejected(self):
+        result = self._run(
+            "declare -F trusted_executable >/dev/null; "
+            "if trusted_executable ../bin/sh; then exit 9; fi; echo rejected")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "rejected")
+
+    def test_cargo_is_resolved_without_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            cargo = home / ".cargo" / "bin" / "cargo"
+            cargo.parent.mkdir(parents=True)
+            cargo.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            cargo.chmod(0o755)
+            attacker = Path(tmp) / "attacker"
+            attacker.mkdir()
+            evil = attacker / "cargo"
+            evil.write_text("#!/bin/sh\nexit 9\n", encoding="utf-8")
+            evil.chmod(0o755)
+            result = self._run("resolve_cargo", {
+                "HOME": str(home), "PATH": str(attacker),
+                "CARGO_HOME": ""})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        found = Path(result.stdout.strip())
+        self.assertTrue(found.is_absolute())
+        self.assertNotEqual(found, evil)
+
+    def test_privileged_commands_are_never_bare(self):
+        text = COMMON.read_text(encoding="utf-8")
+        self.assertIn("trusted_executable", text)
+        self.assertIn("run_root_tool", text)
+        self.assertIn("CARGO_BIN", text)
+        for pattern in ("command -v sudo", "command -v cargo",
+                        "run_privileged apt-get", "run_privileged pacman",
+                        "run_privileged dnf", "run_privileged modprobe",
+                        "run_privileged tee", "run_privileged udevadm"):
+            self.assertNotIn(pattern, text)
+
+
 class DispatcherTests(unittest.TestCase):
     def test_install_all_delegates_to_distro_script(self):
         text = (ROOT / "install_all.sh").read_text(encoding="utf-8")
         self.assertIn("detect_family", text)
         for script in DISTRO_SCRIPTS:
             self.assertIn(script, text)
+
+
+class RootExecutionGuardTests(unittest.TestCase):
+    """Kurulum/kaldırma betikleri kök olarak çalıştırılmamalı.
+
+    Betikler depo tarafından denetlenen yardımcı kütüphaneyi ``source`` eder;
+    kök kabuğa ait ``PATH``/ortam değişkenleriyle bu kod yüklenmeden önce
+    yükseltilmiş çalıştırma reddedilmelidir.
+    """
+
+    ENTRY_POINTS = ("install_all.sh", "install_arch.sh", "install_ubuntu.sh",
+                    "install_debian.sh", "install_fedora.sh", "uninstall.sh")
+
+    def test_each_entry_point_refuses_root_before_sourcing(self):
+        for name in self.ENTRY_POINTS:
+            text = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("Do not run", text, name)
+            self.assertIn('"$(id -u)"', text, name)
+            guard = text.index('"$(id -u)"')
+            source = text.index("source \"$DIR/packaging/install-common.sh\"")
+            self.assertLess(guard, source,
+                            "{}: kök denetimi source'tan önce olmalı".format(name))
+
+    def test_common_library_refuses_direct_execution(self):
+        text = COMMON.read_text(encoding="utf-8")
+        self.assertIn("This file is a library", text)
+        self.assertIn("install_all.sh or install_<distro>.sh", text)
+
+    def test_root_execution_is_refused_before_source(self):
+        for name in self.ENTRY_POINTS:
+            with tempfile.TemporaryDirectory() as tmp:
+                bindir = Path(tmp) / "bin"
+                bindir.mkdir()
+                # kök kullanıcı kimliğini taklit et: denetim source'tan önce
+                # çalışmazsa betik gerçek kurulum adımlarına geçerdi.
+                fake_id = bindir / "id"
+                fake_id.write_text("#!/bin/sh\necho 0\n", encoding="utf-8")
+                fake_id.chmod(0o755)
+                result = subprocess.run(
+                    ["/bin/bash", str(ROOT / name)],
+                    capture_output=True, text=True,
+                    env={"PATH": str(bindir), "HOME": tmp, "LANG": "C"})
+            self.assertNotEqual(result.returncode, 0, name)
+            self.assertIn("regular user", result.stderr.lower(), name)
+
+    def test_common_library_direct_execution_is_refused(self):
+        result = subprocess.run(
+            ["/bin/bash", str(COMMON)], capture_output=True, text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": "/tmp", "LANG": "C"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("library", result.stderr.lower())
 
 
 if __name__ == "__main__":

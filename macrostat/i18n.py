@@ -478,11 +478,21 @@ _EN = {
         "Only an udev rule for input devices is installed; broad chmod 666 is never used."
     ),
     "Kurulacak kural /dev/uinput ve event aygıtlarına yalnızca oturum "
-    "sahibine erişim verir (MODE=0660, uaccess). Geniş 'input' grubu "
-    "üyeliği gerekmez; kural sonraki oturumda da geçerlidir.": (
+    "açan kullanıcıya erişim verir (MODE=0660, uaccess). Geniş 'input' "
+    "grubu üyeliği gerekmez; kural sonraki oturumda da geçerlidir.": (
         "The rule grants access to /dev/uinput and event devices only to the "
-        "session owner (MODE=0660, uaccess). Broad 'input' group membership "
+        "logged-in user (MODE=0660, uaccess). Broad 'input' group membership "
         "is not required; the rule remains valid in later sessions."
+    ),
+    "Gizlilik notu: bu izin kullanıcı genelindedir, uygulama başına "
+    "değildir. Oturum açıkken hesabınızda çalışan her program "
+    "input/event* aygıtlarını okuyabilir ve /dev/uinput üzerine "
+    "yazabilir. udev tek başına süreç bazlı yalıtım sağlayamaz; "
+    "bu ayrıcalıklı bir aracı gerektirir.": (
+        "Privacy note: this permission is user-wide, not per application. "
+        "While you are logged in, any program running under your account can "
+        "read input/event* devices and write to /dev/uinput. udev cannot "
+        "provide per-process isolation; that requires a privileged broker."
     ),
     "udev kuralını kurmak için yönetici izni istemini onaylıyorum.": (
         "I approve the administrator permission prompt to install the udev rule."

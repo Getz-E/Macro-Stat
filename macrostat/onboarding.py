@@ -118,10 +118,22 @@ class PermissionsPage(QWizardPage):
 
         info = QLabel(T(
             "Kurulacak kural /dev/uinput ve event aygıtlarına yalnızca oturum "
-            "sahibine erişim verir (MODE=0660, uaccess). Geniş 'input' grubu "
-            "üyeliği gerekmez; kural sonraki oturumda da geçerlidir."))
+            "açan kullanıcıya erişim verir (MODE=0660, uaccess). Geniş 'input' "
+            "grubu üyeliği gerekmez; kural sonraki oturumda da geçerlidir."))
         info.setWordWrap(True)
         layout.addWidget(info)
+
+        # `uaccess` ACL'i uygulama başına değil, oturum açan kullanıcı
+        # genelinde uygulanır; kurulum öncesi bu sınır açıkça bildirilir.
+        scope = QLabel(T(
+            "Gizlilik notu: bu izin kullanıcı genelindedir, uygulama başına "
+            "değildir. Oturum açıkken hesabınızda çalışan her program "
+            "input/event* aygıtlarını okuyabilir ve /dev/uinput üzerine "
+            "yazabilir. udev tek başına süreç bazlı yalıtım sağlayamaz; "
+            "bu ayrıcalıklı bir aracı gerektirir."))
+        scope.setObjectName("onboardingDetail")
+        scope.setWordWrap(True)
+        layout.addWidget(scope)
 
         self.chk_consent = QCheckBox(
             T("udev kuralını kurmak için yönetici izni istemini onaylıyorum."))

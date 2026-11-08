@@ -5,6 +5,22 @@
 from . import theme
 from .common import *  # noqa: F401,F403
 
+
+def plain_message_box(parent, icon, title, text):
+    """Dış kaynaklı metni Qt zengin metni olarak yorumlamadan gösterir.
+
+    İçe aktarma uyarıları ve motor çıktısı saldırgan denetiminde olabilir;
+    ``PlainText`` biçimi HTML bağlantılarının veya biçimlendirmenin
+    yorumlanmasını engeller.
+    """
+    box = QMessageBox(parent)
+    box.setIcon(icon)
+    box.setWindowTitle(title)
+    box.setTextFormat(Qt.TextFormat.PlainText)
+    box.setText(text)
+    return box
+
+
 class SlidingSwitch(QWidget):
     toggled = pyqtSignal(bool)
 

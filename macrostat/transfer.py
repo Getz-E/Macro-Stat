@@ -11,24 +11,26 @@ Kurallar:
 import copy
 import json
 import os
-import re
 import tempfile
 import time
 from pathlib import Path
 
-from .sanitize import sanitize_display_text
+from .sanitize import (
+    BTN_PART_RE,
+    ID_RE,
+    KEY_PART_RE,
+    TRIGGER_MODES,
+    is_valid_trigger,
+    sanitize_display_text,
+)
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_MACROS = 500
 MAX_PROFILES = 100
 MAX_TEXT_BYTES = 64 * 1024
 
-_PART_RE = re.compile(r"^(?:KEY_[A-Z0-9_]+|BTN_[A-Z0-9_]+)$")
-_KEY_PART_RE = re.compile(r"^KEY_[A-Z0-9_]+$")
-_BTN_PART_RE = re.compile(r"^BTN_[A-Z0-9_]+$")
 #: İçe aktarılan makro/profil kimlikleri: yalnızca harf, rakam, '_' ve '-'.
 #: Kimlikler motora komut satırında geçebilir; kontrol/bidi karakter kabul edilmez.
-_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 _PROFILE_FIELDS = (
     "id", "name", "description", "panicKey", "restartKey", "virtualDeviceName",
@@ -39,10 +41,6 @@ _MACRO_FIELDS = (
     "repeatCount", "doubleTapTimeoutMs", "holdDurationMs", "actions",
     "releaseActions", "createdAt", "updatedAt",
 )
-_TRIGGER_MODES = {
-    "ONCE", "WHILE_HELD", "TOGGLE_LOOP", "REPEAT_COUNT", "DOUBLE_TAP",
-    "HOLD_LONG_PRESS", "PRESS_AND_RELEASE",
-}
 
 
 class TransferError(Exception):
@@ -91,7 +89,7 @@ def _sanitize_action(raw, warnings):
 
     if a_type in ("KEY_TAP", "KEY_DOWN", "KEY_UP"):
         key = act.get("key")
-        if not isinstance(key, str) or not _KEY_PART_RE.match(key):
+        if not isinstance(key, str) or not KEY_PART_RE.match(key):
             warnings.append(T_("Geçersiz tuş eylemi atlandı: {}").format(a_type))
             return None
         result = {"type": a_type, "key": key}
@@ -99,7 +97,7 @@ def _sanitize_action(raw, warnings):
             result["delayMs"] = _as_int(act.get("delayMs"), 20, 1, 10000)
     elif a_type in ("MOUSE_CLICK", "MOUSE_DOWN", "MOUSE_UP"):
         button = act.get("mouseButton", "BTN_LEFT")
-        if not isinstance(button, str) or not _BTN_PART_RE.match(button):
+        if not isinstance(button, str) or not BTN_PART_RE.match(button):
             button = "BTN_LEFT"
         result = {"type": a_type, "mouseButton": button}
         if a_type == "MOUSE_CLICK":
@@ -164,7 +162,7 @@ def _sanitize_macro(raw, warnings, used_ids, id_prefix):
     macro = {key: copy.deepcopy(raw[key]) for key in _MACRO_FIELDS if key in raw}
 
     macro_id = macro.get("id")
-    if (not isinstance(macro_id, str) or not _ID_RE.match(macro_id)
+    if (not isinstance(macro_id, str) or not ID_RE.match(macro_id)
             or macro_id in used_ids):
         macro_id = "macro-{}".format(time.time_ns() // 1_000_000)
         suffix = 1
@@ -190,7 +188,8 @@ def _sanitize_macro(raw, warnings, used_ids, id_prefix):
             warnings.append(T_("Geçersiz tetikleyici boşaltıldı."))
 
     mode = macro.get("triggerMode")
-    macro["triggerMode"] = mode if mode in _TRIGGER_MODES else "ONCE"
+    macro["triggerMode"] = (
+        mode if isinstance(mode, str) and mode in TRIGGER_MODES else "ONCE")
     macro["repeatCount"] = _as_int(macro.get("repeatCount"), 1, 1, 9999)
     if "doubleTapTimeoutMs" in raw:
         macro["doubleTapTimeoutMs"] = _as_int(raw.get("doubleTapTimeoutMs"), 300, 50, 5000)
@@ -202,7 +201,10 @@ def _sanitize_macro(raw, warnings, used_ids, id_prefix):
 
     for list_name, prefix in (("actions", "act"), ("releaseActions", "rel")):
         clean = []
-        for index, action in enumerate(raw.get(list_name) or []):
+        values = raw.get(list_name)
+        if not isinstance(values, list):
+            values = []
+        for index, action in enumerate(values):
             if len(clean) >= MAX_MACROS * 20:
                 warnings.append(T_("Eylem sınırı aşıldı; kalanlar atlandı."))
                 break
@@ -223,7 +225,7 @@ def _sanitize_profile(raw, warnings, used_profile_ids, used_macro_ids, id_prefix
     profile = {key: copy.deepcopy(raw[key]) for key in _PROFILE_FIELDS if key in raw}
 
     profile_id = profile.get("id")
-    if (not isinstance(profile_id, str) or not _ID_RE.match(profile_id)
+    if (not isinstance(profile_id, str) or not ID_RE.match(profile_id)
             or profile_id in used_profile_ids):
         profile_id = "profile-{}".format(time.time_ns() // 1_000_000)
         suffix = 1
@@ -243,10 +245,10 @@ def _sanitize_profile(raw, warnings, used_profile_ids, used_macro_ids, id_prefix
         profile.pop("description", None)
 
     panic = profile.get("panicKey")
-    if not isinstance(panic, str) or not _KEY_PART_RE.match(panic):
+    if not isinstance(panic, str) or not KEY_PART_RE.match(panic):
         profile.pop("panicKey", None)
     restart = profile.get("restartKey")
-    if not isinstance(restart, str) or not _KEY_PART_RE.match(restart):
+    if not isinstance(restart, str) or not KEY_PART_RE.match(restart):
         profile.pop("restartKey", None)
     device = profile.get("virtualDeviceName")
     if _text_ok(device) and sanitize_display_text(device, max_len=80).strip():
@@ -256,7 +258,10 @@ def _sanitize_profile(raw, warnings, used_profile_ids, used_macro_ids, id_prefix
     profile["defaultJitterMs"] = _as_int(profile.get("defaultJitterMs"), 2, 0, 1000)
 
     macros = []
-    for macro in raw.get("macros") or []:
+    raw_macros = raw.get("macros")
+    if not isinstance(raw_macros, list):
+        raw_macros = []
+    for macro in raw_macros:
         if len(macros) >= MAX_MACROS:
             warnings.append(T_("Makro sınırı aşıldı; kalanlar atlandı."))
             break
@@ -270,8 +275,7 @@ def _sanitize_profile(raw, warnings, used_profile_ids, used_macro_ids, id_prefix
 def _valid_combo(value):
     if not isinstance(value, str) or not value:
         return False
-    parts = value.split("+")
-    return 1 <= len(parts) <= 3 and all(_PART_RE.match(part) for part in parts)
+    return 1 <= len(value.split("+")) <= 3 and is_valid_trigger(value)
 
 
 def _looks_like_profile(data):

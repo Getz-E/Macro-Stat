@@ -4,6 +4,7 @@
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -149,6 +150,118 @@ class ProfileMigrationTests(unittest.TestCase):
         self.assertEqual(active["id"], "legacy")
         self.assertEqual(target.active_profile_id, "legacy")
         self.assertEqual(target.all_profiles, [legacy])
+
+    def test_profile_symlink_is_not_followed(self):
+        secret = Path(self.tmp.name) / "secret.json"
+        secret.write_text(json.dumps({
+            "id": "gizli-profil", "name": "Secret",
+            "macros": [{"id": "s1", "actions": []}],
+        }), encoding="utf-8")
+        self.path.symlink_to(secret)
+        target = self._target()
+        active = self.core_mixin.load_profile(target)
+        self.assertNotEqual(active.get("id"), "gizli-profil")
+        self.assertFalse(any(p.get("id") == "gizli-profil"
+                             for p in target.all_profiles))
+
+    def test_loaded_ids_keys_and_security_fields_are_validated(self):
+        self.path.write_text(json.dumps({
+            "activeProfileId": "../kötü id",
+            "profiles": [{
+                "id": "../kötü id",
+                "panicKey": "KEY_PAUSE\nrm -rf /",
+                "restartKey": "rm -rf /",
+                "macros": [
+                    {"id": "dup", "enabled": "false",
+                     "triggerKey": "KEY_A<script>", "triggerMode": "EVIL",
+                     "actions": [{"id": "a1"}, "bozuk"]},
+                    {"id": "dup", "triggerKey": " key_f8 ",
+                     "actions": []},
+                ],
+            }],
+        }), encoding="utf-8")
+        target = self._target()
+        self.core_mixin.load_profile(target)
+        profile = target.all_profiles[0]
+        self.assertRegex(profile["id"], r"^[A-Za-z0-9_-]{1,64}$")
+        self.assertNotIn("panicKey", profile)
+        self.assertNotIn("restartKey", profile)
+        macros = profile["macros"]
+        self.assertEqual(len(macros), 2)
+        self.assertNotEqual(macros[0]["id"], macros[1]["id"])
+        for macro in macros:
+            self.assertRegex(macro["id"], r"^[A-Za-z0-9_-]{1,64}$")
+        self.assertEqual(len(macros[0]["actions"]), 1)
+        self.assertRegex(macros[0]["actions"][0]["id"],
+                         r"^[A-Za-z0-9_-]{1,64}$")
+        self.assertEqual(macros[1]["actions"], [])
+        self.assertIs(macros[0]["enabled"], False)
+        self.assertEqual(macros[0]["triggerKey"], "")
+        self.assertEqual(macros[0]["triggerMode"], "ONCE")
+        self.assertIn("KEY_F8", macros[1]["triggerKey"].upper())
+
+
+class MalformedProfileSanitizationTests(unittest.TestCase):
+    """Bozuk alan türleri profil yüklemeyi çökertmemeli."""
+
+    def setUp(self):
+        from macrostat.core import sanitize_loaded_profile
+
+        self.sanitize = sanitize_loaded_profile
+
+    def test_unhashable_trigger_modes_fall_back_to_once(self):
+        for mode in ([], {}, ["ONCE"], {"mode": "ONCE"}, set()):
+            with self.subTest(mode=mode):
+                profile = self.sanitize(
+                    {"macros": [{"triggerMode": mode}]})
+                self.assertEqual(profile["macros"][0]["triggerMode"], "ONCE")
+
+    def test_none_and_invalid_string_trigger_modes_fall_back_to_once(self):
+        for mode in (None, "", "EVIL", 3, True):
+            with self.subTest(mode=mode):
+                profile = self.sanitize(
+                    {"macros": [{"triggerMode": mode}]})
+                self.assertEqual(profile["macros"][0]["triggerMode"], "ONCE")
+
+    def test_valid_trigger_mode_is_preserved(self):
+        profile = self.sanitize(
+            {"macros": [{"triggerMode": "TOGGLE_LOOP"}]})
+        self.assertEqual(profile["macros"][0]["triggerMode"], "TOGGLE_LOOP")
+
+    def test_non_list_actions_and_release_actions_are_cleared(self):
+        for field in ("actions", "releaseActions"):
+            for value in ({}, "action", None, True, 1):
+                with self.subTest(field=field, value=value):
+                    profile = self.sanitize(
+                        {"macros": [{"triggerKey": "KEY_A", field: value}]})
+                    self.assertEqual(profile["macros"][0][field], [])
+
+    def test_non_list_macros_are_cleared(self):
+        for value in ({}, "macro", None, True, 1):
+            with self.subTest(value=value):
+                profile = self.sanitize(
+                    {"id": "p1", "name": "P", "macros": value})
+                self.assertEqual(profile["macros"], [])
+
+    def test_load_profile_does_not_crash_on_malformed_trigger_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "profile.json"
+            path.write_text(json.dumps({
+                "profiles": [{
+                    "id": "p1", "name": "P",
+                    "macros": [{"id": "m1", "triggerMode": []}],
+                }],
+            }), encoding="utf-8")
+            with mock.patch.object(common, "PROFILE_PATH", path):
+                target = type("Target", (), {})()
+                loaded = self.sanitize({
+                    "id": "p1", "macros": [{"triggerMode": []}],
+                })
+                self.assertEqual(loaded["macros"][0]["triggerMode"], "ONCE")
+                # Gerçek yükleme yolu da aynı bozuk dosyayla çökmemeli.
+                from macrostat.core import CoreMixin
+                active = CoreMixin.load_profile(target)
+                self.assertEqual(active["macros"][0]["triggerMode"], "ONCE")
 
 
 class TriggerValidationTests(unittest.TestCase):
@@ -445,27 +558,93 @@ class ProfileSaveTests(unittest.TestCase):
         self.core_mixin.save_profile_to_disk(target, restart_daemon=False)
         self.assertTrue((self.path.parent / "profile.json.bak").exists())
 
+    def test_save_does_not_copy_symlink_target_into_backup(self):
+        secret = self.path.parent / "secret.txt"
+        secret.write_text("SECRET-CONTENT", encoding="utf-8")
+        self.path.symlink_to(secret)
+        target = self._target()
+        self.assertTrue(self.core_mixin.save_profile_to_disk(
+            target, restart_daemon=False))
+        self.assertFalse(self.path.is_symlink())
+        self.assertEqual(secret.read_text(encoding="utf-8"), "SECRET-CONTENT")
+        backup = self.path.with_name(self.path.name + ".bak")
+        if backup.exists():
+            self.assertNotIn("SECRET-CONTENT",
+                             backup.read_text(encoding="utf-8",
+                                              errors="ignore"))
+
+    def test_backup_error_does_not_corrupt_profile(self):
+        target = self._target()
+        self.assertTrue(self.core_mixin.save_profile_to_disk(
+            target, restart_daemon=False))
+        backup = self.path.with_name(self.path.name + ".bak")
+        backup.unlink(missing_ok=True)
+        backup.mkdir()
+        original_mode = stat.S_IMODE(os.stat(backup).st_mode)
+        self.assertTrue(self.core_mixin.save_profile_to_disk(
+            target, restart_daemon=False))
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(data["activeProfileId"], "p1")
+        self.assertTrue(backup.is_dir())
+        self.assertEqual(stat.S_IMODE(os.stat(backup).st_mode), original_mode)
+
 
 class DaemonProcessTests(unittest.TestCase):
+    """Sonlandırma yalnızca motor kimliğini taşıyan süreçlere uygulanır."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.daemon_bin = Path(self.tmp.name) / "macrostat-daemon"
+        shutil.copy2("/bin/sleep", self.daemon_bin)
+        self.daemon_bin.chmod(0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _stop(self, proc):
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
     def test_zombie_counts_as_dead(self):
-        proc = subprocess.Popen(["sleep", "30"])
+        proc = subprocess.Popen([str(self.daemon_bin), "30"])
         try:
             self.assertTrue(common._process_alive(proc.pid))
-            common._terminate_daemon_pid(proc.pid)
+            common._terminate_daemon_pid(proc.pid, expected_child=True)
             # Zombi süreç (henüz reap edilmedi) ölü sayılmalı; aksi halde
             # arayüz her motor durdurmasında timeout kadar donar.
             self.assertFalse(common._process_alive(proc.pid))
         finally:
-            proc.wait()
+            self._stop(proc)
+
+    def test_exited_child_is_never_signalled(self):
+        proc = subprocess.Popen([str(self.daemon_bin), "0"])
+        proc.wait()
+        with mock.patch.object(common.os, "kill") as kill:
+            common._terminate_daemon_pid(proc.pid, expected_child=True)
+        kill.assert_not_called()
 
     def test_terminate_does_not_block_on_timeout(self):
-        proc = subprocess.Popen(["sleep", "30"])
+        signal_ignoring = Path(self.tmp.name) / "macrostat-daemon"
+        shutil.copy2("/bin/sh", signal_ignoring)
+        proc = subprocess.Popen(
+            [str(signal_ignoring), "-c", "trap '' TERM; while :; do :; done"])
         try:
             started = time.monotonic()
-            common._terminate_daemon_pid(proc.pid)
-            self.assertLess(time.monotonic() - started, 0.5)
+            common._terminate_daemon_pid(
+                proc.pid, timeout=0.2, expected_child=True)
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertFalse(common._process_alive(proc.pid))
         finally:
-            proc.wait()
+            self._stop(proc)
+
+    def test_foreign_process_is_never_signalled(self):
+        proc = subprocess.Popen(["sleep", "30"])
+        try:
+            common._terminate_daemon_pid(proc.pid, expected_child=True)
+            self.assertIsNone(proc.poll())
+        finally:
+            self._stop(proc)
 
 
 class TransferTests(unittest.TestCase):
@@ -591,6 +770,13 @@ class UdevRuleTests(unittest.TestCase):
         self.patch.stop()
         self.tmp.cleanup()
 
+    def _patch_trusted_tools(self):
+        mapping = {name: "/usr/bin/" + name for name in
+                   ("pkexec", "sudo", "sh", "modprobe", "cat", "udevadm")}
+        return mock.patch.object(
+            common, "trusted_system_executable",
+            side_effect=lambda name: mapping.get(name))
+
     def test_detects_installed_rule(self):
         self.assertFalse(common.udev_rule_installed())
         self.rule.parent.mkdir(parents=True)
@@ -603,7 +789,7 @@ class UdevRuleTests(unittest.TestCase):
         self.rule.parent.mkdir(parents=True)
 
         def fake_run(cmd, **_kwargs):
-            assert cmd[:3] == ["pkexec", "sh", "-c"]
+            self.assertEqual(cmd[:3], ["/usr/bin/pkexec", "/usr/bin/sh", "-c"])
             script = cmd[3]
             self.assertIn('MODE="0660"', script)
             self.assertIn('TAG+="uaccess"', script)
@@ -614,7 +800,7 @@ class UdevRuleTests(unittest.TestCase):
             self.rule.write_text(common.UDEV_RULE_CONTENT, encoding="utf-8")
             return types.SimpleNamespace(returncode=0)
 
-        with mock.patch.object(common.shutil, "which", return_value="/usr/bin/pkexec"), \
+        with self._patch_trusted_tools(), \
                 mock.patch.object(common.subprocess, "run", side_effect=fake_run):
             ok, detail = common.install_udev_rule()
         self.assertTrue(ok, detail)
@@ -634,7 +820,7 @@ class UdevRuleTests(unittest.TestCase):
             self.rule.write_text(common.UDEV_RULE_CONTENT, encoding="utf-8")
             return types.SimpleNamespace(returncode=0)
 
-        with mock.patch.object(common.shutil, "which", return_value="/usr/bin/pkexec"), \
+        with self._patch_trusted_tools(), \
                 mock.patch.object(common.subprocess, "run", side_effect=fake_run):
             ok, detail = common.install_udev_rule()
         self.assertTrue(ok, detail)
@@ -755,7 +941,9 @@ class SecurityHardeningTests(unittest.TestCase):
         self.assertEqual(common.coerce_int(-3, 5, 1, 99), 1)
 
     def test_daemon_lookup_never_uses_path(self):
-        with mock.patch.object(common.shutil, "which",
+        import shutil
+
+        with mock.patch.object(shutil, "which",
                                side_effect=AssertionError("PATH lookup")):
             candidates = common._daemon_candidates()
         self.assertTrue(candidates)
@@ -864,6 +1052,39 @@ class SecurityHardeningTests(unittest.TestCase):
 
 
 class TransferSanitizeTests(unittest.TestCase):
+    def _import_macro(self, **fields):
+        macro = {"triggerKey": "KEY_A"}
+        macro.update(fields)
+        result = transfer.import_payload({
+            "profiles": [{"name": "P", "macros": [macro]}],
+        })
+        return result["profiles"][0]["macros"][0]
+
+    def test_import_trigger_mode_must_be_a_supported_string(self):
+        for mode in ([], {}, None, "", "EVIL", 3, True):
+            with self.subTest(mode=mode):
+                imported = self._import_macro(triggerMode=mode)
+                self.assertEqual(imported["triggerMode"], "ONCE")
+
+    def test_import_preserves_valid_trigger_mode(self):
+        imported = self._import_macro(triggerMode="TOGGLE_LOOP")
+        self.assertEqual(imported["triggerMode"], "TOGGLE_LOOP")
+
+    def test_import_actions_and_release_actions_must_be_lists(self):
+        for field in ("actions", "releaseActions"):
+            for value in ({}, "action", None, True, 1):
+                with self.subTest(field=field, value=value):
+                    imported = self._import_macro(**{field: value})
+                    self.assertEqual(imported[field], [])
+
+    def test_import_profile_macros_must_be_a_list(self):
+        for value in ({}, "macro", None, True, 1):
+            with self.subTest(value=value):
+                result = transfer.import_payload({
+                    "profiles": [{"name": "P", "macros": value}],
+                })
+                self.assertEqual(result["profiles"][0]["macros"], [])
+
     def test_import_sanitizes_control_and_markup_in_names(self):
         result = transfer.import_payload({
             "name": "A\x00<b>",
@@ -880,6 +1101,49 @@ class TransferSanitizeTests(unittest.TestCase):
         self.assertFalse(transfer.is_text_within_limits(
             "a" * (transfer.MAX_TEXT_BYTES + 1)))
         self.assertFalse(transfer.is_text_within_limits(None))
+
+
+class SystemStatusTests(unittest.TestCase):
+    def test_symlink_loop_resolution_failure_does_not_crash(self):
+        from macrostat.system import SystemMixin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = Path(tmp) / "profile.json"
+            loop.symlink_to(loop)
+            info = mock.Mock()
+            stub = type("Stub", (), {})()
+            stub.sys_info = info
+            original_resolve = Path.resolve
+
+            def resolve(path, *args, **kwargs):
+                if path == loop:
+                    raise RuntimeError("Symlink loop")
+                return original_resolve(path, *args, **kwargs)
+
+            with mock.patch.object(common, "PROFILE_PATH", loop), \
+                    mock.patch.object(Path, "resolve", resolve):
+                SystemMixin.refresh_system_status(stub)
+
+            text = info.setPlainText.call_args.args[0]
+            self.assertIn(str(loop), text)
+
+    def test_valid_profile_symlink_is_resolved(self):
+        from macrostat.system import SystemMixin
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "real-profile.json"
+            target.write_text("{}", encoding="utf-8")
+            link = Path(tmp) / "profile.json"
+            link.symlink_to(target)
+            info = mock.Mock()
+            stub = type("Stub", (), {})()
+            stub.sys_info = info
+
+            with mock.patch.object(common, "PROFILE_PATH", link):
+                SystemMixin.refresh_system_status(stub)
+
+            text = info.setPlainText.call_args.args[0]
+            self.assertIn(str(target.resolve()), text)
 
 
 class PackageTests(unittest.TestCase):

@@ -3,12 +3,8 @@
 """Pencere kurulumu, profil yaşam döngüsü, dil ve sekme yönetimi."""
 
 import json
-import os
-import shutil
 import sys
-import tempfile
 import time
-from pathlib import Path
 
 from PyQt6.QtGui import QAction, QActionGroup
 
@@ -50,10 +46,83 @@ def build_exclusive_menu(menu, choices, current, on_pick):
     return group
 
 
-def sanitize_loaded_profile(profile):
-    """Yüklenen profil sözlüğünü yerinde temizler ve döndürür."""
+def _fresh_id(prefix, used):
+    """``used`` kümesiyle çakışmayan, motorun kabul ettiği bir kimlik üretir."""
+    base = "{}-{}".format(prefix, time.time_ns() // 1_000_000)
+    candidate = base
+    suffix = 1
+    while candidate in used:
+        candidate = "{}-{}".format(base, suffix)
+        suffix += 1
+    used.add(candidate)
+    return candidate
+
+
+def _valid_plain_or_evdev_key(value, allow_button=False):
+    """``KEY_*`` biçimini veya motorun düz tuş adı biçimini doğrular.
+
+    Motor ``F9``/``PAUSE`` gibi adları da çözer; bu yüzden geçerli bir
+    profil yalnızca ``KEY_`` öneki yok diye bozulmamalıdır. Her iki biçim
+    de denetim karakteri ve boşluk içermez.
+    """
+    if not isinstance(value, str):
+        return False
+    candidate = value.strip()
+    if common.is_valid_key_name(candidate, allow_button=allow_button):
+        return True
+    return common.is_plain_key_name(candidate)
+
+
+def _normalize_loaded_trigger(value):
+    """Geçerli tetikleyiciyi büyük harfli kanonik biçime çevirir."""
+    if not isinstance(value, str) or not common.is_valid_trigger(value):
+        return ""
+    return "+".join(part.strip().upper() for part in value.split("+"))
+
+
+def _sanitize_loaded_actions(macro, field, used_ids):
+    actions = macro.get(field)
+    if not isinstance(actions, list):
+        if field in macro:
+            macro[field] = []
+        return
+    clean = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        action_id = action.get("id")
+        if (not isinstance(action_id, str) or not common.is_valid_id(action_id)
+                or action_id in used_ids):
+            action_id = _fresh_id("act", used_ids)
+        else:
+            used_ids.add(action_id)
+        action["id"] = action_id
+        clean.append(action)
+    macro[field] = clean
+
+
+def sanitize_loaded_profile(profile, used_profile_ids=None):
+    """Yüklenen profil sözlüğünü yerinde doğrular ve temizler.
+
+    Motorla aynı güvenlik sınırlarını uygular: kimlikler, tetikleyiciler ve
+    STOP/yeniden başlatma tuşları güvenli biçimde sınırlandırılır; görünen
+    metinler Qt zengin metin yorumlamasına izin vermeyecek şekilde
+    temizlenir. Geçerli alanlar olduğu gibi korunur; eksik alanlar
+    eklenmez (motorun serde varsayılanları geçerlidir).
+    """
     if not isinstance(profile, dict):
         return profile
+    if used_profile_ids is None:
+        used_profile_ids = set()
+
+    profile_id = profile.get("id")
+    if (not isinstance(profile_id, str) or not common.is_valid_id(profile_id)
+            or profile_id in used_profile_ids):
+        profile_id = _fresh_id("profile", used_profile_ids)
+    else:
+        used_profile_ids.add(profile_id)
+    profile["id"] = profile_id
+
     for field, limit in (("name", _NAME_LIMIT),
                          ("description", _DESCRIPTION_LIMIT),
                          ("virtualDeviceName", _NAME_LIMIT)):
@@ -62,11 +131,42 @@ def sanitize_loaded_profile(profile):
         if isinstance(profile.get(field), str):
             profile[field] = common.sanitize_display_text(
                 profile[field], max_len=limit)
+
+    # virtualDeviceName motorda 80 karakterle sınırlıdır.
+    if isinstance(profile.get("virtualDeviceName"), str):
+        profile["virtualDeviceName"] = common.sanitize_display_text(
+            profile["virtualDeviceName"], max_len=80)
+
+    panic = profile.get("panicKey")
+    if isinstance(panic, str) and _valid_plain_or_evdev_key(panic):
+        profile["panicKey"] = panic.strip().upper()
+    else:
+        profile.pop("panicKey", None)
+
+    restart = profile.get("restartKey")
+    if (isinstance(restart, str)
+            and common.is_valid_key_name(restart.strip().upper(),
+                                         allow_button=False)):
+        profile["restartKey"] = restart.strip().upper()
+    else:
+        profile.pop("restartKey", None)
+
     macros = profile.get("macros")
     if isinstance(macros, list):
+        used_macro_ids = set()
+        clean_macros = []
         for macro in macros:
             if not isinstance(macro, dict):
                 continue
+            macro_id = macro.get("id")
+            if (not isinstance(macro_id, str)
+                    or not common.is_valid_id(macro_id)
+                    or macro_id in used_macro_ids):
+                macro_id = _fresh_id("macro", used_macro_ids)
+            else:
+                used_macro_ids.add(macro_id)
+            macro["id"] = macro_id
+
             for field, limit in (("name", _NAME_LIMIT),
                                  ("description", _DESCRIPTION_LIMIT)):
                 if isinstance(macro.get(field), str):
@@ -74,10 +174,30 @@ def sanitize_loaded_profile(profile):
                         macro[field], max_len=limit)
                 elif field in macro:
                     macro[field] = ""
+
+            if "enabled" in macro and not isinstance(macro["enabled"], bool):
+                macro["enabled"] = False
+            if "triggerKey" in macro:
+                macro["triggerKey"] = _normalize_loaded_trigger(
+                    macro.get("triggerKey"))
+            if "triggerMode" in macro:
+                mode = macro.get("triggerMode")
+                macro["triggerMode"] = (
+                    mode if isinstance(mode, str)
+                    and mode in common.TRIGGER_MODES else "ONCE")
+
             for field, (default, low, high) in _MACRO_NUMBERS.items():
                 if field in macro:
                     macro[field] = common.coerce_int(
                         macro[field], default, low, high)
+
+            used_action_ids = set()
+            _sanitize_loaded_actions(macro, "actions", used_action_ids)
+            _sanitize_loaded_actions(macro, "releaseActions", used_action_ids)
+            clean_macros.append(macro)
+        profile["macros"] = clean_macros
+    elif "macros" in profile:
+        profile["macros"] = []
     return profile
 
 
@@ -122,39 +242,54 @@ class CoreMixin:
     def load_profile(self):
         self.all_profiles = []
         self.active_profile_id = ""
-        if common.PROFILE_PATH.exists():
+        if common.PROFILE_PATH.exists() or common.PROFILE_PATH.is_symlink():
+            # Motorla aynı güvenli okuma: O_NOFOLLOW, yalnızca normal dosya,
+            # 32 MiB sınırı. Profil dosyası başka bir hedefe işaret edemez.
             try:
-                with open(common.PROFILE_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if data.get("profiles") and isinstance(data["profiles"], list) and len(data["profiles"]) > 0:
-                        self.all_profiles = [
-                            sanitize_loaded_profile(p) for p in data["profiles"]
-                            if isinstance(p, dict)]
-                    if self.all_profiles:
-                        self.active_profile_id = data.get("activeProfileId", self.all_profiles[0].get("id", ""))
-                        for p in self.all_profiles:
-                            if p.get("id") == self.active_profile_id:
-                                return p
-                        return self.all_profiles[0]
-                    elif data.get("macros"):
-                        self.all_profiles = [sanitize_loaded_profile(data)]
-                        self.active_profile_id = data.get("id", "profile-cachy")
-                        return data
-            except Exception as e:
+                data = json.loads(
+                    common.read_private_text_file(common.PROFILE_PATH))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
                 print(f"[UYARI] profile.json okunamadı: {e}")
+                data = None
+            if isinstance(data, dict):
+                used_profile_ids = set()
+                profiles = data.get("profiles")
+                if isinstance(profiles, list) and profiles:
+                    self.all_profiles = [
+                        sanitize_loaded_profile(p, used_profile_ids)
+                        for p in profiles if isinstance(p, dict)]
+                if self.all_profiles:
+                    requested = data.get("activeProfileId")
+                    if (isinstance(requested, str)
+                            and any(p.get("id") == requested
+                                    for p in self.all_profiles)):
+                        self.active_profile_id = requested
+                    else:
+                        self.active_profile_id = self.all_profiles[0].get(
+                            "id", "")
+                    for p in self.all_profiles:
+                        if p.get("id") == self.active_profile_id:
+                            return p
+                    return self.all_profiles[0]
+                elif data.get("macros"):
+                    loaded = sanitize_loaded_profile(data, used_profile_ids)
+                    self.all_profiles = [loaded]
+                    self.active_profile_id = loaded.get("id", "")
+                    return loaded
         # Depodaki tek kanonik profil şablonu; gömülü JSON kopyası yok.
         default_p = None
         seed = DEFAULT_PROFILE_PATH
-        if seed.exists():
+        if seed.exists() or seed.is_symlink():
             try:
-                with open(seed, "r", encoding="utf-8") as f:
-                    seed_data = json.load(f)
-                profiles = seed_data.get("profiles") or []
+                seed_data = json.loads(common.read_private_text_file(seed))
+                profiles = (seed_data.get("profiles") or []
+                            if isinstance(seed_data, dict) else [])
+                profiles = [p for p in profiles if isinstance(p, dict)]
                 if profiles:
                     default_p = sanitize_loaded_profile(profiles[0])
-                elif seed_data.get("macros"):
+                elif isinstance(seed_data, dict) and seed_data.get("macros"):
                     default_p = sanitize_loaded_profile(seed_data)
-            except Exception as e:
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
                 print(f"[UYARI] Varsayılan profil şablonu okunamadı: {e}")
         if not default_p:
             default_p = {
@@ -203,33 +338,23 @@ class CoreMixin:
             target_save_path = common.PROFILE_PATH
             target_save_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # Atomik yazma: 0600 geçici dosya + fsync + os.replace; eski sürüm .bak.
-            # Profil adları/makrolar kişisel veridir; başka kullanıcılar okuyamaz.
-            fd, tmp_name = tempfile.mkstemp(
-                prefix=target_save_path.name + ".", suffix=".tmp",
-                dir=str(target_save_path.parent))
-            tmp_path = Path(tmp_name)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    os.fchmod(f.fileno(), 0o600)
-                    json.dump(payload, f, indent=2, ensure_ascii=False)
-                    f.flush()
-                    os.fsync(f.fileno())
-                if target_save_path.exists():
-                    backup_path = target_save_path.with_name(
-                        target_save_path.name + ".bak")
-                    try:
-                        shutil.copy2(target_save_path, backup_path)
-                        os.chmod(backup_path, 0o600)
-                    except OSError:
-                        pass
-                os.replace(tmp_path, target_save_path)
-            finally:
+            # Atomik ve özel yazma: 0600 geçici dosya + fsync + os.replace.
+            # Profil adları/makrolar kişisel veridir; başka kullanıcılar
+            # okuyamaz. Yedek de sembolik bağlantı izlemeden kopyalanır;
+            # yedek hatası profilin kendisini bozmaz.
+            if target_save_path.exists() or target_save_path.is_symlink():
+                backup_path = target_save_path.with_name(
+                    target_save_path.name + ".bak")
                 try:
-                    if tmp_path.exists():
-                        tmp_path.unlink()
+                    common.backup_private_file(
+                        target_save_path, backup_path)
                 except OSError:
                     pass
+
+            common.atomic_write_private(
+                target_save_path,
+                json.dumps(payload, indent=2,
+                           ensure_ascii=False).encode("utf-8"))
 
             if restart_daemon:
                 self.apply_profile_to_daemon()

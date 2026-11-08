@@ -4,6 +4,12 @@
 # Fedora 41+ installation entry point (python3-pyqt6 6.7+, rust 1.83+).
 set -euo pipefail
 
+# Yardımcı kütüphane source edilmeden önce kök çalıştırmayı reddet.
+if [ "$(id -u)" -eq 0 ]; then
+    printf '❌ Do not run this installer as root. Run it as your regular user; the script elevates only package and udev steps.\n' >&2
+    exit 1
+fi
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 DISTRO_FAMILY="fedora"

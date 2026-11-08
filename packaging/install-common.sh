@@ -224,70 +224,224 @@ install_desktop_shortcut() {
 }
 
 # ---------------------------------------------------------------------------
-# Package installation
+# Trusted executable resolution
 # ---------------------------------------------------------------------------
-run_privileged() {
-    if [ "$(id -u)" -eq 0 ]; then
-        "$@"
-    elif command -v sudo >/dev/null 2>&1; then
-        sudo "$@"
-    else
-        printf '❌ Root/sudo is required for this step: %s\n' "$*" >&2
-        exit 1
+# Ayrıcalıklı komutlar PATH'ten çözülmez: sabit, kök sahipli dizinlerde aranır.
+TRUSTED_BIN_DIRS=("/usr/bin" "/bin" "/usr/sbin" "/sbin" "/usr/local/bin" "/usr/local/sbin")
+
+# stat de PATH'ten çözülmemeli; doğrulamanın kendisi ele geçirilebilir olmasın.
+trusted_stat() {
+    local candidate
+    for candidate in /usr/bin/stat /bin/stat; do
+        if [ -x "$candidate" ]; then
+            "$candidate" "$@"
+            return
+        fi
+    done
+    return 127
+}
+
+# Kök sahipli ve grup/dünya tarafından yazılamaz dosya veya dizin mi?
+trusted_root_path() {
+    local path="$1" owner mode
+    [ -e "$path" ] || return 1
+    owner="$(trusted_stat -Lc '%u' "$path" 2>/dev/null)" || return 1
+    mode="$(trusted_stat -Lc '%a' "$path" 2>/dev/null)" || return 1
+    [ "$owner" = "0" ] || return 1
+    if (( 8#$mode & 8#022 )); then
+        return 1
     fi
+    return 0
+}
+
+# Ada göre güvenilir sistem aracının mutlak yolunu yazar.
+trusted_executable() {
+    local name="$1" directory candidate
+    case "$name" in
+        ""|*/*) return 1 ;;
+    esac
+    for directory in "${TRUSTED_BIN_DIRS[@]}"; do
+        trusted_root_path "$directory" || continue
+        candidate="$directory/$name"
+        [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+        trusted_root_path "$candidate" || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
+trusted_required() {
+    local name="$1" path
+    if ! path="$(trusted_executable "$name")"; then
+        printf '❌ Trusted system tool not found: %s\n' "$name" >&2
+        return 1
+    fi
+    printf '%s\n' "$path"
+}
+
+# Kullanıcıya ait, grup/dünya yazılamaz çalıştırılabilir mi? (ayrıcalık yok)
+user_owned_executable() {
+    local path="$1" owner mode parent parent_owner parent_mode
+    case "$path" in
+        /*) ;;
+        *) return 1 ;;
+    esac
+    [ -f "$path" ] && [ -x "$path" ] || return 1
+    owner="$(trusted_stat -Lc '%u' "$path" 2>/dev/null)" || return 1
+    mode="$(trusted_stat -Lc '%a' "$path" 2>/dev/null)" || return 1
+    [ "$owner" = "$EUID" ] || return 1
+    if (( 8#$mode & 8#022 )); then
+        return 1
+    fi
+    parent="${path%/*}"
+    parent_owner="$(trusted_stat -Lc '%u' "$parent" 2>/dev/null)" || return 1
+    parent_mode="$(trusted_stat -Lc '%a' "$parent" 2>/dev/null)" || return 1
+    [ "$parent_owner" = "$EUID" ] || return 1
+    if (( 8#$parent_mode & 8#022 )); then
+        return 1
+    fi
+    return 0
+}
+
+# PATH'e başvurmadan doğrulanmış cargo adayları (kullanıcı rustup'ı önce).
+cargo_candidates() {
+    local path cargo_home="${CARGO_HOME:-}"
+    if [ -n "$cargo_home" ] && [ "${cargo_home#/}" != "$cargo_home" ]; then
+        path="$cargo_home/bin/cargo"
+        if user_owned_executable "$path"; then
+            printf '%s\n' "$path"
+        fi
+    fi
+    if [ -n "${HOME:-}" ]; then
+        path="$HOME/.cargo/bin/cargo"
+        if user_owned_executable "$path"; then
+            printf '%s\n' "$path"
+        fi
+    fi
+    path="/usr/lib/rust-$RUST_MIN_VERSION/bin/cargo"
+    if trusted_root_path "$path" && [ -f "$path" ] && [ -x "$path" ]; then
+        printf '%s\n' "$path"
+    fi
+    if path="$(trusted_executable cargo)"; then
+        printf '%s\n' "$path"
+    fi
+    return 0
+}
+
+cargo_version() {
+    local _ version
+    read -r _ version _ < <("$1" --version 2>/dev/null) || return 1
+    printf '%s\n' "$version"
+}
+
+# İsteğe bağlı en düşük sürümü karşılayan ilk doğrulanmış cargo yolunu yazar.
+resolve_cargo() {
+    local minimum="${1:-}" path version
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        if [ -z "$minimum" ]; then
+            printf '%s\n' "$path"
+            return 0
+        fi
+        if ! version="$(cargo_version "$path")"; then
+            continue
+        fi
+        if version_ge "${version:-0}" "$minimum"; then
+            printf '%s\n' "$path"
+            return 0
+        fi
+    done < <(cargo_candidates)
+    return 1
+}
+
+run_root_tool() {
+    local name="$1" path
+    shift
+    if ! path="$(trusted_executable "$name")"; then
+        printf '❌ Trusted system tool not found: %s\n' "$name" >&2
+        return 1
+    fi
+    run_privileged "$path" "$@"
+}
+
+run_privileged() {
+    local sudo_bin
+    if [ "$EUID" -eq 0 ]; then
+        "$@"
+        return
+    fi
+    if sudo_bin="$(trusted_executable sudo)"; then
+        "$sudo_bin" "$@"
+        return
+    fi
+    printf '❌ Root/sudo is required for this step: %s\n' "$*" >&2
+    exit 1
 }
 
 # Runs the command as the target user (for file ownership while running as root).
 run_as_user() {
-    local user="$1"; shift
+    local user="$1" sudo_bin runuser_bin
+    shift
     if [ "$(id -un)" = "$user" ]; then
         "$@"
-    elif command -v sudo >/dev/null 2>&1; then
-        sudo -u "$user" "$@"
-    else
-        runuser -u "$user" -- "$@"
+        return
     fi
+    if sudo_bin="$(trusted_executable sudo)"; then
+        "$sudo_bin" -u "$user" "$@"
+        return
+    fi
+    if runuser_bin="$(trusted_executable runuser)"; then
+        "$runuser_bin" -u "$user" -- "$@"
+        return
+    fi
+    printf '❌ sudo/runuser not found for user switch: %s\n' "$user" >&2
+    exit 1
 }
 
 ensure_pyqt6_repo() {
     # On Ubuntu python3-pyqt6 is only in the 'universe' repository; a clean
     # server install may have universe disabled. On Debian the package is in main.
-    if ! command -v apt-cache >/dev/null 2>&1; then
+    local apt_cache
+    if ! apt_cache="$(trusted_executable apt-cache)"; then
         return 0
     fi
-    if apt-cache show python3-pyqt6 >/dev/null 2>&1; then
+    if "$apt_cache" show python3-pyqt6 >/dev/null 2>&1; then
         return 0
     fi
     # Minimal installs with an empty package list: refresh the index first.
-    run_privileged apt-get update
-    if apt-cache show python3-pyqt6 >/dev/null 2>&1; then
+    run_root_tool apt-get update
+    if "$apt_cache" show python3-pyqt6 >/dev/null 2>&1; then
         return 0
     fi
     printf '   enabling the universe repository...\n'
-    run_privileged apt-get install -y software-properties-common
-    run_privileged add-apt-repository -y universe
-    run_privileged apt-get update
+    run_root_tool apt-get install -y software-properties-common
+    run_root_tool add-apt-repository -y universe
+    run_root_tool apt-get update
 }
 
 install_packages() {
     local -a packages
+    local env_bin apt_get
     case "$DISTRO_FAMILY" in
         arch)
             packages=(python python-pyqt6 rust cargo)
-            run_privileged pacman -S --needed --noconfirm "${packages[@]}"
+            run_root_tool pacman -S --needed --noconfirm "${packages[@]}"
             ;;
         debian)
             if [ "${EXPECTED_DISTRO:-}" = "ubuntu" ]; then
                 ensure_pyqt6_repo
             fi
             packages=(python3 python3-pyqt6 rustc cargo)
-            run_privileged apt-get update
-            run_privileged env DEBIAN_FRONTEND=noninteractive \
-                apt-get install -y --no-install-recommends "${packages[@]}"
+            run_root_tool apt-get update
+            env_bin="$(trusted_required env)" || return 1
+            apt_get="$(trusted_required apt-get)" || return 1
+            run_privileged "$env_bin" DEBIAN_FRONTEND=noninteractive \
+                "$apt_get" install -y --no-install-recommends "${packages[@]}"
             ;;
         fedora)
             packages=(python3 python3-pyqt6 rust cargo)
-            run_privileged dnf install -y "${packages[@]}"
+            run_root_tool dnf install -y "${packages[@]}"
             ;;
         *)
             printf '❌ Unknown package family: %s\n' "$DISTRO_FAMILY" >&2
@@ -300,20 +454,23 @@ install_packages() {
 # `rustc-1.79` / `cargo-1.79` paketleri güvenli quick-xml için gereken tabanı
 # sağlar. Binler /usr/lib/rust-1.79/bin altında gelir.
 install_versioned_rust() {
-    local version="$RUST_MIN_VERSION"
+    local version="$RUST_MIN_VERSION" apt_cache env_bin apt_get
     if [ "${MACROSTAT_SKIP_PACKAGES:-0}" -eq 1 ]; then
         return 1
     fi
-    if [ "$DISTRO_FAMILY" != debian ] || ! command -v apt-cache >/dev/null 2>&1; then
+    if [ "$DISTRO_FAMILY" != debian ]; then
         return 1
     fi
-    if ! apt-cache show "rustc-$version" >/dev/null 2>&1 ||
-       ! apt-cache show "cargo-$version" >/dev/null 2>&1; then
+    apt_cache="$(trusted_required apt-cache)" || return 1
+    if ! "$apt_cache" show "rustc-$version" >/dev/null 2>&1 ||
+       ! "$apt_cache" show "cargo-$version" >/dev/null 2>&1; then
         return 1
     fi
     printf '   Installing rustc/cargo %s from the distribution...\n' "$version"
-    run_privileged env DEBIAN_FRONTEND=noninteractive \
-        apt-get install -y --no-install-recommends \
+    env_bin="$(trusted_required env)" || return 1
+    apt_get="$(trusted_required apt-get)" || return 1
+    run_privileged "$env_bin" DEBIAN_FRONTEND=noninteractive \
+        "$apt_get" install -y --no-install-recommends \
         "rustc-$version" "cargo-$version" || return 1
     if [ -d "/usr/lib/rust-$version/bin" ]; then
         PATH="/usr/lib/rust-$version/bin:$PATH"
@@ -323,21 +480,30 @@ install_versioned_rust() {
 }
 
 require_rust() {
-    local min="$RUST_MIN_VERSION" version=""
-    if command -v cargo >/dev/null 2>&1; then
-        version="$(cargo --version 2>/dev/null | awk '{print $2}')"
+    local min="$RUST_MIN_VERSION" cargo_bin version=""
+    if cargo_bin="$(resolve_cargo "$min")"; then
+        CARGO_BIN="$cargo_bin"
+        export CARGO_BIN
+        return 0
     fi
-    if ! version_ge "${version:-0}" "$min" && install_versioned_rust; then
-        version="$(cargo --version 2>/dev/null | awk '{print $2}')"
+    if install_versioned_rust; then
+        if cargo_bin="$(resolve_cargo "$min")"; then
+            CARGO_BIN="$cargo_bin"
+            export CARGO_BIN
+            return 0
+        fi
     fi
-    if [ -z "$version" ]; then
+    if ! cargo_bin="$(resolve_cargo)"; then
         printf '❌ cargo not found. Check the installation packages.\n' >&2
         exit 1
     fi
-    if ! version_ge "${version:-0}" "$min"; then
+    version="$(cargo_version "$cargo_bin")" || version=""
+    if [ -n "$version" ]; then
         printf '❌ Rust %s or newer is required; found: %s\n' "$min" "$version" >&2
-        exit 1
+    else
+        printf '❌ Rust %s or newer is required; cargo version could not be read.\n' "$min" >&2
     fi
+    exit 1
 }
 
 # ---------------------------------------------------------------------------
@@ -392,22 +558,26 @@ main() {
     require_rust
 
     printf '⚙️  Building the Rust macro engine (release)...\n'
-    cargo build --release --locked
+    "$CARGO_BIN" build --release --locked
     install -m 755 target/release/macrostat-daemon ./macrostat-daemon
     chmod +x ./start-macrostat.sh
 
     printf '🛡️  Installing the udev hardware permission rule...\n'
+    printf '⚠️  The uaccess ACL applies to your logged-in user, not to MacroStat alone.\n'
+    printf '   While you are logged in, any program running as your user can read\n'
+    printf '   input/event* devices and write to /dev/uinput. udev cannot restrict\n'
+    printf '   this per application; per-process isolation needs a privileged broker.\n'
     local target_user="${SUDO_USER:-${USER:-$(id -un)}}"
     if ! [[ "$target_user" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$ ]]; then
         printf "❌ Invalid user name: '%s'\n" "$target_user" >&2
         exit 1
     fi
-    run_privileged modprobe uinput 2>/dev/null || true
+    run_root_tool modprobe uinput 2>/dev/null || true
     # Grant only the session owner (uaccess) instead of MODE 0666 or the broad 'input' group.
     udev_rule_content |
-        run_privileged tee /etc/udev/rules.d/99-macrostat.rules >/dev/null
-    run_privileged udevadm control --reload-rules
-    run_privileged udevadm trigger
+        run_root_tool tee /etc/udev/rules.d/99-macrostat.rules >/dev/null
+    run_root_tool udevadm control --reload-rules
+    run_root_tool udevadm trigger
 
     local user_home
     user_home="$(getent passwd "$target_user" 2>/dev/null | awk -F: '{print $6}')"
@@ -439,8 +609,9 @@ main() {
     printf '   (On GNOME, desktop icons may be hidden by default; open the app from the menu.)\n'
 }
 
-# Run the main flow when executed directly (not sourced).
+# Bu dosya yalnızca giriş betikleri tarafından source edilmelidir. Doğrudan
+# çalıştırma, kök denetimini ve dağıtıma özgü kurulumu atlayacağı için reddedilir.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-    set -euo pipefail
-    main "$@"
+    printf '❌ This file is a library. Run install_all.sh or install_<distro>.sh instead.\n' >&2
+    exit 1
 fi

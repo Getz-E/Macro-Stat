@@ -1,3 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # PyQt6 is distributed under the GNU GPL v3; MacroStat is therefore GPL-3.0-or-later.
-PyQt6>=6.5
+# Üst sınır bilinçli: PyQt7 API/uyumluluk kırılmalarını ve denetlenmemiş
+# büyük sürüm atlamalarını engeller.
+PyQt6>=6.5,<7

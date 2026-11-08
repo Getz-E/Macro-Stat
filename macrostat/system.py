@@ -2,6 +2,8 @@
 # Copyright (C) 2026 MacroStat contributors
 """Sistem sekmesi, motor süreç denetimi, izinler ve yedekleme."""
 
+import errno
+import json
 import os
 import shutil
 import signal
@@ -16,8 +18,24 @@ from .widgets import SlidingSwitch, KeyCaptureDialog  # noqa: F401
 
 
 def write_pid_file(pid):
-    """Pid dosyasını 0600 izinle ve sembolik bağlantı izlemeden yazar."""
-    common.write_private_bytes(PID_FILE, "{}\n".format(pid).encode("ascii"))
+    """Pid dosyasını 0600 izinle motorun doğrulanabilir kimliğiyle yazar."""
+    identity = common._proc_identity(pid)
+    if identity is None:
+        raise OSError(errno.EINVAL, "daemon identity unavailable")
+    common.write_private_bytes(
+        PID_FILE, (json.dumps(identity) + "\n").encode("utf-8"))
+
+
+def _resolved_profile_path(path):
+    """Profil yolunu çözer; çözümleme hatasında özgün yolu korur.
+
+    Python 3.12 ``Path.resolve`` sembolik bağlantı döngüsünde ``RuntimeError``
+    yükseltir; bu durumda profil yolu değiştirilmeden kullanılır.
+    """
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path
 
 
 class SystemMixin:
@@ -136,7 +154,8 @@ class SystemMixin:
             T("Erişilebilir (Yazma İzni Var)") if uinput_ok
             else T("Erişim Yok (İzin Gerekli)"),
             common.DAEMON_BIN or T("İkili Dosya Bulunamadı (cargo build --release çalıştırın)"),
-            common.PROFILE_PATH.resolve() if common.PROFILE_PATH else T("Bulunamadı"),
+            _resolved_profile_path(common.PROFILE_PATH)
+            if common.PROFILE_PATH else T("Bulunamadı"),
             common.PANIC_KEY,
             LOG_FILE,
         )
@@ -230,11 +249,14 @@ class SystemMixin:
     def stop_daemon(self):
         try:
             if self.daemon_proc is not None:
-                try:
-                    _terminate_daemon_pid(self.daemon_proc.pid)
-                    self.daemon_proc.wait(timeout=0.5)
-                except Exception:
-                    pass
+                # Ölmüş çocuk referansı için eski PID'ye sinyal gönderilmez.
+                if self.daemon_proc.poll() is None:
+                    try:
+                        _terminate_daemon_pid(
+                            self.daemon_proc.pid, expected_child=True)
+                        self.daemon_proc.wait(timeout=0.5)
+                    except Exception:
+                        pass
                 self.daemon_proc = None
             else:
                 _terminate_daemon_pid(_pid_file_pid())
@@ -289,11 +311,14 @@ class SystemMixin:
         common.DAEMON_BIN, common.PROFILE_PATH = common.locate_paths()
         try:
             if self.daemon_proc is not None:
-                try:
-                    _terminate_daemon_pid(self.daemon_proc.pid)
-                    self.daemon_proc.wait(timeout=0.5)
-                except Exception:
-                    pass
+                # Ölmüş çocuk referansı için eski PID'ye sinyal gönderilmez.
+                if self.daemon_proc.poll() is None:
+                    try:
+                        _terminate_daemon_pid(
+                            self.daemon_proc.pid, expected_child=True)
+                        self.daemon_proc.wait(timeout=0.5)
+                    except Exception:
+                        pass
                 self.daemon_proc = None
             else:
                 # Yalnızca pidfile ile doğrulanmış kendi motorumuz sonlandırılır.
@@ -305,14 +330,16 @@ class SystemMixin:
 
             if not common.DAEMON_BIN or not common.DAEMON_BIN.exists():
                 cargo_dir = SCRIPT_DIR if (SCRIPT_DIR / "Cargo.toml").exists() else None
+                cargo_bin = common.find_cargo() if cargo_dir else None
 
-                if cargo_dir and shutil.which("cargo"):
+                if cargo_dir and cargo_bin:
                     self.status_badge.setText(T("Motor derleniyor..."))
                     theme.set_state(self.status_badge, "info")
                     QApplication.processEvents()
                     try:
-                        subprocess.run(["cargo", "build", "--release", "--locked"],
-                                       cwd=cargo_dir, check=False)
+                        subprocess.run(
+                            [str(cargo_bin), "build", "--release", "--locked"],
+                            cwd=cargo_dir, check=False)
                         built = cargo_dir / "target" / "release" / "macrostat-daemon"
                         if built.exists():
                             shutil.copy2(built, SCRIPT_DIR / "macrostat-daemon")
@@ -333,7 +360,8 @@ class SystemMixin:
             except OSError:
                 self._daemon_log_offset = 0
             self.daemon_proc = subprocess.Popen(
-                [str(common.DAEMON_BIN.resolve()), str(common.PROFILE_PATH.resolve())],
+                [str(common.DAEMON_BIN.resolve()),
+                 str(_resolved_profile_path(common.PROFILE_PATH))],
                 cwd=str(SCRIPT_DIR),
                 stdout=log_f,
                 stderr=subprocess.STDOUT,

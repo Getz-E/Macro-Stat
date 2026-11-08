@@ -94,6 +94,37 @@ membership or `chmod 666` is not needed. Alternatively the
 **Fix Hardware Permissions Automatically (udev)** button in the interface
 installs the same rule through a narrowly scoped `pkexec`.
 
+> **Privacy note — the ACL is user-wide, not per application.** udev resolves
+> `uaccess` per logged-in user, not per process. While you are logged in, any
+> program running under your user account can read every `input/event*` device
+> (including keystrokes typed into other applications) and write to
+> `/dev/uinput` to synthesize system-wide input. The rule removes `0666` and
+> permanent `input` group membership, but it cannot create a sandbox between
+> your own programs. Per-application isolation is not expressible in udev; it
+> would require a privileged broker or a dedicated system service. Only install
+> the rule if you trust the code that runs as your user.
+
+## Release verification
+
+A release is created only after the same checks as CI pass on the tagged
+commit: `cargo fmt --check`, `cargo clippy`, `cargo test --release --locked`,
+the Python unit and offscreen GUI tests, and a RustSec `cargo audit`. Every
+GitHub Actions step is pinned to an immutable commit SHA, and the workflow's
+default token permission is read-only.
+
+Each release publishes `macrostat-<tag>-linux-x86_64.tar.gz` and a SHA-256
+checksum file. Verify both the checksum and the build provenance before
+installing:
+
+```bash
+sha256sum -c macrostat-<tag>-linux-x86_64.tar.gz.sha256
+gh attestation verify macrostat-<tag>-linux-x86_64.tar.gz --repo Getz-E/Macro-Stat
+```
+
+The attestation is Sigstore-based build provenance issued by GitHub Actions: it
+proves which workflow and commit produced the archive. It is **not** a
+maintainer GPG signature and is not described as one.
+
 ## Engine behaviour
 
 - Triggers are compiled at startup; they are not re-parsed on every key event.
@@ -175,8 +206,9 @@ engine is stopped, only a lightweight watcher process that reads that key runs.
 - **Log:** `$XDG_RUNTIME_DIR/macrostat.log` (or `~/.cache/macrostat/`; rotated to
   `.1` above 1 MB).
 - **Orphan process / stuck keys after STOP:** the new engine shuts down cleanly
-  on `SIGTERM`; the interface never uses `pkill -f`, it verifies the pidfile plus
-  `/proc/<pid>/exe`.
+  on `SIGTERM`; the interface never uses `pkill -f`. It verifies the stored
+  pidfile identity (`pid`, start time, uid, executable path) against the live
+  process before sending any signal.
 
 ## Development
 
@@ -311,6 +343,37 @@ Kural yalnızca `TAG+="uaccess"` + `MODE="0660"` kullanır; geniş `input` grubu
 **Donanım İzinlerini Otomatik Düzelt (udev)** düğmesi dar kapsamlı `pkexec`
 ile aynı kuralı kurar.
 
+> **Gizlilik notu — ACL kullanıcı genelindedir, uygulama başına değildir.**
+> udev `uaccess` etiketini süreç başına değil, oturum açmış kullanıcı başına
+> çözer. Oturumunuz açıkken kullanıcı hesabınızla çalışan **her** program tüm
+> `input/event*` aygıtlarını (başka uygulamalara yazılan tuşlar dahil)
+> okuyabilir ve `/dev/uinput` üzerine yazarak sistem genelinde girdi
+> üretebilir. Kural `0666` iznini ve kalıcı `input` grubu üyeliğini kaldırır,
+> ancak kendi programlarınız arasında bir kum havuzu oluşturamaz. Uygulama
+> başına yalıtım udev ile ifade edilemez; ayrıcalıklı bir aracı (broker) veya
+> ayrı bir sistem servisi gerektirir. Kuralı yalnızca kullanıcınızla çalışan
+> koda güveniyorsanız kurun.
+
+## Sürüm doğrulama
+
+Bir sürüm, etiketlenen commit üzerinde CI ile aynı denetimler geçmeden
+oluşturulmaz: `cargo fmt --check`, `cargo clippy`,
+`cargo test --release --locked`, Python birim ve offscreen arayüz testleri ve
+RustSec `cargo audit`. Her GitHub Actions adımı değişmez bir commit SHA'sına
+sabitlenir; iş akışının varsayılan belirteç izni salt okunurdur.
+
+Her sürüm `macrostat-<etiket>-linux-x86_64.tar.gz` ve bir SHA-256 sağlama
+dosyası yayınlar. Kurmadan önce hem sağlamayı hem derleme kökenini doğrulayın:
+
+```bash
+sha256sum -c macrostat-<etiket>-linux-x86_64.tar.gz.sha256
+gh attestation verify macrostat-<etiket>-linux-x86_64.tar.gz --repo Getz-E/Macro-Stat
+```
+
+Kanıt (attestation), GitHub Actions tarafından üretilen Sigstore tabanlı
+derleme kökenidir: arşivi hangi iş akışının ve commit'in ürettiğini kanıtlar.
+Bakımcı GPG imzası **değildir** ve öyle sunulmaz.
+
 ## Motor davranışı
 
 - Tetikleyiciler açılışta derlenir; her tuş olayında yeniden ayrıştırılmaz.
@@ -391,7 +454,8 @@ izleyici süreci çalışır.
 - **Günlük:** `$XDG_RUNTIME_DIR/macrostat.log` (veya `~/.cache/macrostat/`;
   1 MB üzerinde `.1` olarak döndürülür).
 - **Yetim süreç/STOP sonrası takılı tuş:** Yeni motor `SIGTERM` ile temiz kapanır;
-  arayüz `pkill -f` kullanmaz, yalnızca pidfile + `/proc/<pid>/exe` doğrular.
+  arayüz `pkill -f` kullanmaz; sinyal göndermeden önce pid dosyasındaki kimliği
+  (`pid`, başlangıç zamanı, uid, çalıştırılabilir yol) canlı süreçle doğrular.
 
 ## Geliştirme
 

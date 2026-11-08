@@ -5,19 +5,107 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Varsayılan en az yetki; yazma izinleri yalnızca ilgili işlerde tanımlanır.
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  linux-x86_64:
-    name: Linux x86_64 paketi
-    runs-on: ubuntu-latest
+  verify:
+    name: Rust doğrulaması (fmt + clippy + test)
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Rust araç zinciri
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Biçim denetimi
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Birim testleri
+        run: cargo test --release --locked
 
+  python:
+    name: PyQt6 arayüzü (birim + duman testi)
+    runs-on: ubuntu-24.04
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Qt sistem kütüphaneleri (libEGL / libGL)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libgl1
+      - name: PyQt6 kur
+        run: pip install -r requirements.txt
+      - name: Sözdizimi denetimi
+        run: python -m py_compile gui.py macrostat/*.py
+      - name: Python birim testleri
+        run: python -m unittest discover -s tests -v
+      - name: Betik sözdizimi
+        run: |
+          bash -n start-macrostat.sh packaging/macrostat
+          bash -n install_all.sh install_arch.sh install_ubuntu.sh \
+            install_debian.sh install_fedora.sh uninstall.sh \
+            packaging/install-common.sh
+      - name: Offscreen arayüz duman testi
+        run: |
+          python - <<'PY'
+          import sys
+          from PyQt6.QtWidgets import QApplication
+          from macrostat import app as app_mod, common
+          app_mod.MacroStatApp.check_and_auto_start_daemon = lambda self: None
+          app_mod.MacroStatApp.update_daemon_status = lambda self: None
+          common.cleanup_daemon = lambda: None
+          app = QApplication(sys.argv)
+          window = app_mod.MacroStatApp()
+          app.processEvents()
+          assert window.tabs.count() == 4
+          window._force_close = True
+          window.close()
+          print("GUI OK")
+          PY
+
+  audit:
+    name: Bağımlılık güvenlik denetimi (RustSec)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust araç zinciri
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: cargo-audit
+        run: |
+          set -euo pipefail
+          cargo install --locked cargo-audit --version 0.22.2
+          installed="$(cargo-audit --version | awk '{print $2}')"
+          test "$installed" = "0.22.2"
+          cargo audit
+
+  build:
+    name: Linux x86_64 paketi
+    needs: [verify, python, audit]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust araç zinciri
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
       - name: Motoru derle
         run: cargo build --release --locked
 
@@ -45,10 +133,12 @@ jobs:
             "dist/$NAME/install_all.sh" "dist/$NAME"/install_*.sh \
             "dist/$NAME/uninstall.sh" "dist/$NAME/packaging/install-common.sh"
           tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
-          sha256sum "dist/$NAME.tar.gz" > "dist/$NAME.tar.gz.sha256"
+          # Checksum satırı yalnızca dosya adını içermeli; README'deki
+          # `sha256sum -c` komutu indirme dizininde çalıştırılır.
+          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
 
       - name: Arşivi yükle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macrostat-linux-x86_64
           path: |
@@ -56,11 +146,28 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
 
-      - name: GitHub Release
+      - name: Derleme kökeni kanıtı (Sigstore attestation)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          files: |
-            dist/*.tar.gz
-            dist/*.sha256
-          generate_release_notes: true
+          subject-path: dist/*.tar.gz
+
+  publish:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: macrostat-linux-x86_64
+          path: dist
+      - name: Yayını oluştur
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.sha256 \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

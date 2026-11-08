@@ -8,7 +8,24 @@ from pathlib import Path
 
 from . import common, theme, transfer
 from .common import *  # noqa: F401,F403
-from .widgets import SlidingSwitch, KeyCaptureDialog  # noqa: F401
+from .widgets import (  # noqa: F401
+    KeyCaptureDialog, SlidingSwitch, plain_message_box)
+
+
+def _import_summary(result):
+    """İçe aktarma onay metnini üretir; uyarılardaki dış metni temizler."""
+    summary = T("İçe aktarılacak: {} makro, {} profil.").format(
+        len(result.get("macros", [])), len(result.get("profiles", [])))
+    warnings = [
+        common.sanitize_display_text(str(warning), max_len=300)
+        for warning in result.get("warnings", [])
+    ]
+    if warnings:
+        summary += "\n\n" + T("{} uyarı:").format(len(warnings))
+        summary += "\n" + "\n".join(warnings[:8])
+        if len(warnings) > 8:
+            summary += "\n…"
+    return summary
 
 
 class ExportSelectionDialog(QDialog):
@@ -173,23 +190,19 @@ class MacrosMixin:
             result = transfer.import_payload(
                 data, existing_macros, existing_profiles)
         except transfer.TransferError as exc:
-            QMessageBox.critical(self, T("İçe Aktarma Hatası"), str(exc))
+            plain_message_box(self, QMessageBox.Icon.Critical,
+                                 T("İçe Aktarma Hatası"), str(exc)).exec()
             return
 
-        summary = T("İçe aktarılacak: {} makro, {} profil.").format(
-            len(result["macros"]), len(result["profiles"]))
-        if result["warnings"]:
-            summary += "\n\n" + T("{} uyarı:").format(len(result["warnings"]))
-            summary += "\n" + "\n".join(result["warnings"][:8])
-            if len(result["warnings"]) > 8:
-                summary += "\n…"
-        answer = QMessageBox.question(
-            self, T("İçe Aktarmayı Onayla"),
+        summary = _import_summary(result)
+        box = plain_message_box(
+            self, QMessageBox.Icon.Question, T("İçe Aktarmayı Onayla"),
             summary + "\n\n" + T("Mevcut makro ve profiller silinmez; "
-                                 "içe aktarılan makrolar güvenlik için devre dışı eklenir."),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No)
-        if answer != QMessageBox.StandardButton.Yes:
+                                 "içe aktarılan makrolar güvenlik için devre dışı eklenir."))
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        if box.exec() != QMessageBox.StandardButton.Yes:
             return
 
         try:
@@ -210,7 +223,8 @@ class MacrosMixin:
                 T("{} makro ve {} profil içe aktarıldı (makrolar devre dışı).").format(
                     len(result["macros"]), len(result["profiles"])))
         except Exception as exc:
-            QMessageBox.critical(self, T("İçe Aktarma Hatası"), str(exc))
+            plain_message_box(self, QMessageBox.Icon.Critical,
+                                 T("İçe Aktarma Hatası"), str(exc)).exec()
 
     def refresh_macro_table(self):
         macros = self.profile_data.get("macros", [])

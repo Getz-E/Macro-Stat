@@ -10,7 +10,8 @@ from pathlib import Path
 
 from . import common, theme, transfer
 from .common import *  # noqa: F401,F403
-from .widgets import SlidingSwitch, KeyCaptureDialog  # noqa: F401
+from .widgets import (  # noqa: F401
+    KeyCaptureDialog, SlidingSwitch, plain_message_box)
 
 #: Motorun TEXT eylemi için kabul ettiği üst sınırla aynı (transfer modülü).
 MAX_TEXT_BYTES = transfer.MAX_TEXT_BYTES
@@ -18,12 +19,7 @@ MAX_TEXT_BYTES = transfer.MAX_TEXT_BYTES
 
 def _plain_message_box(parent, icon, title, text):
     """Dış kaynaklı metni Qt zengin metni olarak yorumlamadan gösterir."""
-    box = QMessageBox(parent)
-    box.setIcon(icon)
-    box.setWindowTitle(title)
-    box.setTextFormat(Qt.TextFormat.PlainText)
-    box.setText(text)
-    return box
+    return plain_message_box(parent, icon, title, text)
 
 
 class EditorMixin:

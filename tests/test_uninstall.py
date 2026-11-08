@@ -41,7 +41,7 @@ class UninstallTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_uninstall(self, *args):
+    def run_uninstall(self, *args, extra_env=None):
         env = os.environ.copy()
         env.update({
             "HOME": str(self.home),
@@ -53,6 +53,7 @@ class UninstallTests(unittest.TestCase):
             "MACROSTAT_RULES_PATH": str(self.rules),
             "MACROSTAT_PROFILE_PATH": str(self.profile),
         })
+        env.update(extra_env or {})
         return subprocess.run(["bash", str(UNINSTALL), *args],
                               capture_output=True, text=True, env=env)
 
@@ -116,6 +117,60 @@ class UninstallTests(unittest.TestCase):
         result = self.run_uninstall("--help")
         self.assertEqual(result.returncode, 0)
         self.assertIn("Usage", result.stdout)
+
+    def test_privileged_commands_use_trusted_absolute_paths(self):
+        text = UNINSTALL.read_text(encoding="utf-8")
+        self.assertIn("run_root_tool rm -f", text)
+        self.assertIn("trusted_executable udevadm", text)
+        self.assertNotIn("run_privileged rm", text)
+        self.assertNotIn("run_privileged udevadm", text)
+        self.assertNotIn("command -v udevadm", text)
+
+    def test_malicious_rm_earlier_in_path_is_not_executed(self):
+        self.write_ours()
+        marker = self.tmp / "malicious-rm-ran"
+        bin_dir = self.tmp / "bin"
+        bin_dir.mkdir()
+        evil_rm = bin_dir / "rm"
+        evil_rm.write_text(
+            "#!/bin/sh\n: > '{}'\nexit 0\n".format(marker), encoding="utf-8")
+        evil_rm.chmod(0o755)
+
+        result = self.run_uninstall(extra_env={
+            "PATH": "{}:{}".format(bin_dir, os.environ.get("PATH", "")),
+        })
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists(), "PATH'teki sahte rm çalıştırıldı")
+        self.assertFalse((self.apps / "macrostat.desktop").exists())
+        self.assertFalse((self.rules).exists())
+
+    def test_missing_udevadm_does_not_break_uninstall(self):
+        script = """
+set -euo pipefail
+source "{uninstall}"
+trusted_executable() {{ return 1; }}
+run_root_tool() {{ printf 'unexpected\\n'; return 1; }}
+DEFAULT_RULES=/etc/udev/rules.d/99-macrostat.rules
+reload_udev_rules "$DEFAULT_RULES"
+printf 'completed\\n'
+""".format(uninstall=UNINSTALL)
+        env = os.environ.copy()
+        env.update({
+            "HOME": str(self.home),
+            "USER_HOME": str(self.home),
+            "USER": "tester",
+            "MACROSTAT_APPS_DIR": str(self.apps),
+            "MACROSTAT_DESKTOP_DIR": str(self.desktop),
+            "MACROSTAT_ICON_DIR": str(self.icon_dir),
+            "MACROSTAT_RULES_PATH": str(self.rules),
+            "MACROSTAT_PROFILE_PATH": str(self.profile),
+        })
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("completed", result.stdout)
+        self.assertNotIn("unexpected", result.stdout)
 
 
 if __name__ == "__main__":

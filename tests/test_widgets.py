@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QSpinBox, QTableWidget, QWidget,
 )
 
-from macrostat import common, core, editor, onboarding
+from macrostat import common, core, editor, macros, onboarding, widgets
 from macrostat.core import CoreMixin
 from macrostat.editor import EditorMixin
 from macrostat.recorder import RecorderMixin
@@ -261,6 +261,50 @@ class PlainMessageBoxTest(unittest.TestCase):
             self.assertEqual(box.text(), "<b>motor çıktısı</b>")
         finally:
             box.deleteLater()
+
+    def test_widget_helper_forces_plain_text_format(self):
+        box = widgets.plain_message_box(
+            None, QMessageBox.Icon.Warning, "Başlık", "<a href='x'>uyarı</a>")
+        try:
+            self.assertEqual(box.textFormat(), Qt.TextFormat.PlainText)
+            self.assertIn("<a href='x'>", box.text())
+        finally:
+            box.deleteLater()
+
+    def test_import_summary_strips_markup_and_control_chars(self):
+        summary = macros._import_summary({
+            "macros": [], "profiles": [{}],
+            "warnings": ["<img src=x onerror=alert(1)> uyarı", "kötü\x00metin"],
+        })
+        self.assertNotIn("<", summary)
+        self.assertIn("img src=x onerror=alert(1) uyarı", summary)
+        self.assertNotIn("\x00", summary)
+
+    def test_import_confirmation_uses_plain_text_box(self):
+        stub = type("Stub", (), {})()
+        stub.all_profiles = []
+        result = {
+            "macros": [], "profiles": [{"id": "p1", "name": "P"}],
+            "warnings": ["<b>uyarı</b>"],
+        }
+        fake_box = mock.Mock()
+        fake_box.exec.return_value = QMessageBox.StandardButton.No
+
+        with mock.patch.object(macros, "plain_message_box",
+                               return_value=fake_box) as box_maker, \
+                mock.patch.object(macros.QFileDialog, "getOpenFileName",
+                                  return_value=("x.json", "")), \
+                mock.patch.object(macros.transfer, "load_payload", return_value={}), \
+                mock.patch.object(macros.transfer, "import_payload",
+                                  return_value=result):
+            macros.MacrosMixin.import_profile(stub)
+
+        box_maker.assert_called_once()
+        shown = box_maker.call_args.args[3]
+        self.assertNotIn("<", shown)
+        self.assertIn("uyarı", shown)
+        fake_box.setDefaultButton.assert_called_once()
+        fake_box.exec.assert_called_once()
 
     def test_failed_macro_test_shows_stderr_as_plain_text(self):
         stub = type("Stub", (), {})()

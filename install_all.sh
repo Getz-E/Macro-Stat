@@ -12,6 +12,14 @@
 # ==============================================================================
 set -euo pipefail
 
+# Depo tarafından denetlenen yardımcı kütüphaneyi yüklemeden önce kök
+# çalıştırmayı reddet. Kurulum yalnızca normal kullanıcı olarak çalışır;
+# betik paket ve udev adımlarını kendisi yükseltir.
+if [ "$(id -u)" -eq 0 ]; then
+    printf '❌ Do not run this installer as root. Run it as your regular user; the script elevates only package and udev steps.\n' >&2
+    exit 1
+fi
+
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 
 # shellcheck source=packaging/install-common.sh
