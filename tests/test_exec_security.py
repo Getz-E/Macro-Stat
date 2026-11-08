@@ -30,13 +30,19 @@ def _fake_stat(entries):
     entries = {str(path): info for path, info in entries.items()}
 
     def fake_stat(self, *, follow_symlinks=True):
-        # Python 3.12+ Path.stat imzasıyla uyumludur.
+        if not follow_symlinks:
+            try:
+                actual = os.lstat(self)
+                if stat.S_ISLNK(actual.st_mode):
+                    return actual
+            except OSError:
+                pass
         try:
             return entries[str(self)]
         except KeyError:
             raise FileNotFoundError(str(self))
-    return fake_stat
 
+    return fake_stat
 
 def _owned_entries(path, uid, unsafe=None):
     """Dosya ve tüm üst dizinleri için sahte stat sonuçları üretir."""
